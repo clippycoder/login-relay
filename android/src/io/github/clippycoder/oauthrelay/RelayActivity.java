@@ -33,7 +33,7 @@ import java.nio.charset.StandardCharsets;
  * phone.
  *
  * Protocol, newline-delimited JSON:
- *   phone to computer: {"v":1,"type":"open","url":..,"referrer":..}, {"type":"cancel"}
+ *   phone to computer: {"v":1,"type":"open","url":..,"referrer":..,"label":..}, {"type":"cancel"}
  *   computer to phone: {"type":"status","text":..}, {"type":"error","text":..}, {"type":"done"}
  */
 public class RelayActivity extends Activity {
@@ -60,6 +60,7 @@ public class RelayActivity extends Activity {
 
     private volatile String pendingUrl;
     private volatile String pendingReferrer;
+    private volatile String pendingLabel;
     private volatile boolean closing;
     private volatile OutputStream client;
     private volatile LocalSocket clientSocket;
@@ -125,6 +126,7 @@ public class RelayActivity extends Activity {
         Uri ref = getReferrer();
         pendingReferrer = ref == null ? null : ref.toString();
         String caller = ref != null && "android-app".equals(ref.getScheme()) ? ref.getHost() : null;
+        pendingLabel = caller == null ? null : appLabel(caller);
         requestApp.setText(getString(R.string.request_app, appLabel(caller)));
         requestSite.setText(getString(R.string.request_site, data.getHost()));
         Log.i(TAG, "page from " + caller + " for host " + data.getHost());
@@ -361,6 +363,7 @@ public class RelayActivity extends Activity {
             m.put("type", "open");
             m.put("url", url);
             m.put("referrer", pendingReferrer == null ? JSONObject.NULL : pendingReferrer);
+            m.put("label", pendingLabel == null ? JSONObject.NULL : pendingLabel);
             if (send(m.toString())) {
                 show(State.SENT, null);
             }

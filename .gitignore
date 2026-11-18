@@ -4,3 +4,4 @@ __pycache__/
 *.keystore
 .signing/
 .DS_Store
+macos/build/

@@ -14,10 +14,10 @@ Login Relay fixes that without putting a browser on the phone:
 ```
  phone                                   computer (over adb)
  app: "open the sign-in page"
- Login Relay answers as the browser ──▶  oauth_relay.py opens the page in your normal browser
+ Login Relay answers as the browser ──▶  the desktop app opens the page in your normal browser
                                           you sign in there
                                           the site redirects to the app's return address
-                                          oauth_relay.py catches it (temporary URL handler)
+                                          the desktop app catches it (temporary URL handler)
  app finishes the sign-in itself   ◀──   adb shell am start <return address> -p <app>
 ```
 
@@ -26,55 +26,72 @@ session exactly as it would after a normal login.
 
 ## Use it
 
-1. Install `login-relay-<version>.apk` from [Releases](https://github.com/clippycoder/oauth-relay/releases)
-   on the phone. Use `adb install login-relay-0.1.0.apk`, or, on a managed phone, add it as an
-   app in the MDM console (details below).
+### macOS: the menu bar app
 
-2. With the phone connected (USB or wireless debugging), run the helper on the computer:
+1. Download `Login-Relay-macOS-<version>.zip` from [Releases](https://github.com/clippycoder/oauth-relay/releases),
+   unzip, and move **Login Relay** to Applications.
+2. The app isn't notarized (there's no paid Apple developer account behind it), so macOS blocks the
+   first launch. Right-click the app and choose **Open**, or on recent macOS open System Settings →
+   Privacy & Security and choose **Open Anyway**. Or clear the flag once:
+   `xattr -dr com.apple.quarantine "/Applications/Login Relay.app"`.
+3. Plug the phone in with USB and turn on USB debugging (Settings → Developer options). Accept the
+   "Allow USB debugging?" prompt on the phone.
+4. A lock icon appears in the menu bar. If adb isn't installed, the menu offers to download Google's
+   platform-tools (checked against Google's published checksum). If Login Relay isn't on the phone,
+   the menu offers **Install Login Relay on Phone**; the phone app is bundled in the Mac app.
+5. Sign in to an app on the phone as usual. When it opens the sign-in page, Login Relay sends it to
+   your Mac, and your browser opens it. Sign in, and allow the browser to open "Login Relay" when it
+   asks. The app on the phone finishes the login.
 
-   ```
-   gh api -H 'Accept: application/vnd.github.raw' repos/clippycoder/oauth-relay/contents/relay.sh | sh
-   ```
+The menu shows the phone's state and has **Launch at Login**, **Show in Dock** (off by default, so it
+lives only in the menu bar), and **Notify When a Sign-in Arrives**. **Show Activity…** opens a window
+with a log.
 
-   The repo is private for now, so the one-liner goes through `gh`. Once the repo is public it
-   becomes `curl -fsSL https://raw.githubusercontent.com/clippycoder/oauth-relay/main/relay.sh | sh`.
-   `relay.sh` downloads `host/oauth_relay.py` and runs it, so `python3` must be installed. On macOS
-   that comes with the Command Line Tools (`xcode-select --install`). To pass options, use
-   `… | sh -s -- --serial 1234ABCD`. From a clone, run `./relay.sh` or `python3 host/oauth_relay.py`.
+### Linux and Windows: the command-line helper
 
-3. In the app, sign in as usual. When it opens the sign-in page, Login Relay sends it to the computer.
-   Your browser opens it. Sign in, and allow the browser to open "Login Relay" when it asks. The app
-   on the phone completes the login.
+Native Linux and Windows apps are planned. Until then, the same job is done by a Python script. With
+Login Relay installed on the phone (`adb install login-relay-<version>.apk`, or through your MDM) and the
+phone connected over adb, run:
 
-Options: `--serial` picks a phone when several are connected. `--paste` skips the URL handler, and
-you paste the final address by hand instead. `--yes` skips the warning for sign-ins without PKCE.
+```
+gh api -H 'Accept: application/vnd.github.raw' repos/clippycoder/oauth-relay/contents/relay.sh | sh
+```
+
+The repo is private for now, so the one-liner goes through `gh`. Once the repo is public it becomes
+`curl -fsSL https://raw.githubusercontent.com/clippycoder/oauth-relay/main/relay.sh | sh`. `relay.sh`
+downloads `host/oauth_relay.py` and runs it, so `python3` must be installed. To pass options, use
+`… | sh -s -- --serial 1234ABCD`. From a clone, run `./relay.sh` or `python3 host/oauth_relay.py`.
+Options: `--serial` picks a phone, `--paste` skips the URL handler and you paste the final address by
+hand, `--yes` skips the warning for sign-ins without PKCE. The Linux and Windows URL handlers in the
+script are untested.
 
 Links that aren't sign-ins, such as a "terms of service" link, also open on the computer.
 
 ## How it stays safe
 
 - **PKCE.** Most sign-ins send a `code_challenge` and keep the matching secret on the phone. The
-  code that passes through the computer can't be redeemed without that secret. The helper warns
+  code that passes through the computer can't be redeemed without that secret. The app warns
   and asks before relaying a sign-in that doesn't use PKCE.
-- **State check.** The helper only accepts a return address whose `state` matches the sign-in it
+- **State check.** The computer only accepts a return address whose `state` matches the sign-in it
   opened, and it ignores anything else.
 - **Delivered only to the app that asked.** The return address goes back with `-p <package>` of
   the app that opened the page.
 - **Only adb can talk to the phone app.** Login Relay serves on an abstract unix socket, and it
   refuses peers that aren't the `shell` or `root` user, so other apps can't read the pages.
 - **Nothing left behind on the computer.** The URL handler is registered for one login and then
-  removed. If another app already handled that scheme, the helper restores it.
+  removed. If another app already handled that scheme, it is restored.
 
 ## How the computer catches the redirect
 
 | OS | Mechanism | Status |
 |---|---|---|
-| macOS | A throwaway AppleScript applet in `~/Library/Caches/oauth-relay/` that claims the scheme. It's registered with `lsregister`, made the default via LaunchServices, and restored afterwards. | tested |
+| macOS | The running app claims the scheme with LaunchServices for one login and restores the previous handler afterwards (a claim left by a crash is cleaned up on the next launch). It receives the URL as an Apple event, so no helper app is needed. | tested |
 | Linux | A `.desktop` file with `x-scheme-handler/<scheme>` and `xdg-mime default`, restored afterwards | untested |
 | Windows | `HKCU\Software\Classes\<scheme>` pointing at a tiny `pythonw` handler, with the previous key backed up and restored | untested |
 
 Apps that return to an `https://` address (Android App Links) can't be caught this way. For those,
-the helper asks you to paste the final address from the browser's address bar.
+the app asks you to paste the final address from the browser's address bar. It does the same if macOS
+refuses the claim.
 
 ## Managed phones (MDM)
 
@@ -106,23 +123,28 @@ hand-off runs over adb.
 ## Build
 
 ```
-android/build.sh              # bare SDK tools (aapt2, javac, d8, zipalign, apksigner); no Gradle
-android/tools/make_icons.py   # re-render the PNG icons after changing the icon (needs Pillow)
+android/build.sh              # phone app: bare SDK tools (aapt2, javac, d8, zipalign, apksigner); no Gradle
+android/tools/make_icons.py   # re-render the icons after changing the design (needs Pillow)
+macos/Tests/run.sh            # unit tests for the sign-in parsing logic
+macos/build.sh                # Mac app: universal, ad-hoc signed; bundles the phone app if it was built
 ```
 
-Signing uses `KEYSTORE` / `KEYSTORE_PASS` if set. Otherwise it uses `.signing/release.jks` with
+The Mac app builds with the Command Line Tools alone (`swiftc`); Xcode isn't needed. Set
+`CODESIGN_IDENTITY` to sign it with a Developer ID certificate.
+
+Phone app signing uses `KEYSTORE` / `KEYSTORE_PASS` if set. Otherwise it uses `.signing/release.jks` with
 `.signing/password` if present; that folder is gitignored. Failing both, it uses the SDK debug key.
 Updates must be signed with the same key as the installed version, so keep the release key backed up.
 
 ## Protocol
 
 The phone app listens on the abstract unix socket `@oauthrelay` and accepts only uid 0 or 2000.
-The host reaches it with `adb forward tcp:0 localabstract:oauthrelay`. Messages are newline-delimited
+The computer reaches it with `adb forward tcp:0 localabstract:oauthrelay`. Messages are newline-delimited
 JSON:
 
 | direction | message |
 |---|---|
-| phone → computer | `{"v":1,"type":"open","url":…,"referrer":"android-app://<package>"}` |
+| phone → computer | `{"v":1,"type":"open","url":…,"referrer":"android-app://<package>","label":"<app name>"}` (`label` since 0.3.0) |
 | phone → computer | `{"type":"cancel"}` |
 | computer → phone | `{"type":"status","text":…}`, `{"type":"error","text":…}`, `{"type":"done"}` |
 
