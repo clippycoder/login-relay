@@ -5,5 +5,11 @@
         <item name="android:colorPrimaryDark">@color/brand_dark</item>
         <item name="android:colorAccent">#9FA8DA</item>
         <item name="android:statusBarColor">@color/brand_dark</item>
+        <!-- Translucent sheet over the calling app, so the app stays "visible" to Android and
+             isn't killed for memory while you sign in on the computer (it was, on a 2 GB phone). -->
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowNoTitle">true</item>
     </style>
 </resources>

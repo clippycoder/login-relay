@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Compact on purpose: it has to read on a 2.8" flip-phone screen and work with a D-pad. -->
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- A bottom sheet over the dimmed calling app (see the theme for why it's translucent). -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:layout_height="match_parent">
+
+<ScrollView
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom"
+    android:layout_marginTop="24dp"
+    android:background="@drawable/sheet_bg">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -110,3 +117,4 @@
             android:visibility="gone" />
     </LinearLayout>
 </ScrollView>
+</FrameLayout>

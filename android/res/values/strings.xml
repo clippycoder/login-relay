@@ -8,8 +8,8 @@
     <string name="waiting_title">Continue on your computer</string>
     <string name="waiting_detail">Connect this phone to your computer and run the command below. The sign-in page will open there.</string>
 
-    <string name="sent_title">Sign in on your computer</string>
-    <string name="sent_detail">The sign-in page is open in your computer\'s browser. When you finish, you\'ll come back to the app here.</string>
+    <string name="sent_title">Finish on your computer</string>
+    <string name="sent_detail">The page is open in your computer\'s browser. When you\'re done there, you\'ll come back to the app here.</string>
 
     <string name="dropped_title">Computer disconnected</string>
     <string name="dropped_detail">Run the command again to continue signing in.</string>

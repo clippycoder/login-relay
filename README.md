@@ -98,6 +98,10 @@ hand-off runs over adb.
   may still refuse.
 - Some sign-ins cancel if the app's own screen is resumed before the result arrives. Login Relay
   keeps the screen on while it waits, so a screen lock doesn't cancel the login.
+- Low-memory phones kill background apps quickly, and an app killed mid-login forgets the login it
+  started. Login Relay is therefore a translucent sheet over the app rather than a full screen. That
+  keeps the app "visible" to Android (oom_score_adj 100 rather than 700), so it isn't a kill target
+  while you sign in.
 
 ## Build
 
