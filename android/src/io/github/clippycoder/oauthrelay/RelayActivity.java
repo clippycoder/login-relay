@@ -3,16 +3,17 @@ package io.github.clippycoder.oauthrelay;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.graphics.Typeface;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.View;
 import android.view.WindowManager;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.Button;
 import android.widget.TextView;
 
 import org.json.JSONException;
@@ -31,8 +32,9 @@ import java.nio.charset.StandardCharsets;
  * redirect, and sends it back to the app with `adb shell am start`. The page never loads on the
  * phone.
  *
- * Protocol: newline-delimited JSON. Phone to computer: {"v":1,"type":"open","url":..,"referrer":..}.
- * Computer to phone: {"type":"status","text":..}, {"type":"done"}, {"type":"error","text":..}.
+ * Protocol, newline-delimited JSON:
+ *   phone to computer: {"v":1,"type":"open","url":..,"referrer":..}, {"type":"cancel"}
+ *   computer to phone: {"type":"status","text":..}, {"type":"error","text":..}, {"type":"done"}
  */
 public class RelayActivity extends Activity {
     static final String TAG = "OAuthRelay";
@@ -46,16 +48,21 @@ public class RelayActivity extends Activity {
     private static final int UID_ROOT = 0;
     private static final int UID_SHELL = 2000;
 
-    private TextView statusView;
-    private TextView urlView;
-    private TextView commandView;
+    private enum State { IDLE, WAITING, SENT, DROPPED }
+
+    private TextView titleView;
+    private TextView detailView;
+    private View requestCard;
+    private TextView requestApp;
+    private TextView requestSite;
+    private TextView connectionView;
+    private Button cancelButton;
 
     private volatile String pendingUrl;
     private volatile String pendingReferrer;
     private volatile boolean closing;
     private volatile OutputStream client;
     private LocalServerSocket server;
-    private Thread serverThread;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,7 +70,22 @@ public class RelayActivity extends Activity {
         // Several sign-in SDKs cancel the login if their activity is resumed before the result
         // arrives, which happens when the screen locks and unlocks. Keep the screen on instead.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        buildUi();
+        setContentView(R.layout.activity_relay);
+        titleView = findViewById(R.id.status_title);
+        detailView = findViewById(R.id.status_detail);
+        requestCard = findViewById(R.id.request_card);
+        requestApp = findViewById(R.id.request_app);
+        requestSite = findViewById(R.id.request_site);
+        connectionView = findViewById(R.id.connection);
+        cancelButton = findViewById(R.id.cancel);
+        ((TextView) findViewById(R.id.command)).setText(HOST_COMMAND);
+        cancelButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                cancel();
+            }
+        });
+
         startServer();
         handle(getIntent());
     }
@@ -76,95 +98,140 @@ public class RelayActivity extends Activity {
     }
 
     @Override
+    public void onBackPressed() {
+        if (pendingUrl != null) {
+            cancel();
+        } else {
+            super.onBackPressed();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         stopServer();
         super.onDestroy();
     }
 
-    private void buildUi() {
-        int pad = dp(16);
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(pad, pad, pad, pad);
-
-        TextView title = new TextView(this);
-        title.setText("Login Relay");
-        title.setTextSize(22);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        col.addView(title);
-
-        statusView = text(col, 18);
-        urlView = text(col, 14);
-
-        TextView hint = text(col, 14);
-        hint.setText("\nOn a computer with this phone connected over adb, run:");
-        commandView = text(col, 13);
-        commandView.setTypeface(Typeface.MONOSPACE);
-        commandView.setTextIsSelectable(true);
-        commandView.setText(HOST_COMMAND);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(col);
-        setContentView(scroll);
-    }
-
-    private TextView text(LinearLayout parent, int sp) {
-        TextView v = new TextView(this);
-        v.setTextSize(sp);
-        v.setPadding(0, dp(8), 0, 0);
-        parent.addView(v);
-        return v;
-    }
-
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
-    }
+    // ------------------------------------------------------------------ UI
 
     private void handle(Intent intent) {
         Uri data = intent == null ? null : intent.getData();
         if (data == null) {
-            setStatus("This phone has no web browser. When an app wants to open a sign-in page, "
-                    + "Login Relay sends it to your computer instead.");
-            urlView.setText("");
+            show(State.IDLE, null);
             return;
         }
         pendingUrl = data.toString();
         Uri ref = getReferrer();
         pendingReferrer = ref == null ? null : ref.toString();
-        urlView.setText(data.getHost());
-        Log.i(TAG, "page from " + pendingReferrer + " for host " + data.getHost());
+        String caller = ref != null && "android-app".equals(ref.getScheme()) ? ref.getHost() : null;
+        requestApp.setText(getString(R.string.request_app, appLabel(caller)));
+        requestSite.setText(getString(R.string.request_site, data.getHost()));
+        Log.i(TAG, "page from " + caller + " for host " + data.getHost());
         if (client != null) {
             sendOpen();
         } else {
-            setStatus("Continue on your computer. Waiting for it to connect…");
+            show(State.WAITING, null);
         }
     }
 
-    private void setStatus(final String s) {
+    private String appLabel(String pkg) {
+        if (pkg == null) {
+            return getString(R.string.unknown_app);
+        }
+        // The app that started us is visible to us even under Android 11 package visibility.
+        try {
+            PackageManager pm = getPackageManager();
+            ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+            return pm.getApplicationLabel(ai).toString();
+        } catch (PackageManager.NameNotFoundException e) {
+            return pkg;
+        }
+    }
+
+    private void show(final State state, final String detailOverride) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                statusView.setText(s);
+                int title;
+                int detail;
+                switch (state) {
+                    case WAITING:
+                        title = R.string.waiting_title;
+                        detail = R.string.waiting_detail;
+                        break;
+                    case SENT:
+                        title = R.string.sent_title;
+                        detail = R.string.sent_detail;
+                        break;
+                    case DROPPED:
+                        title = R.string.dropped_title;
+                        detail = R.string.dropped_detail;
+                        break;
+                    default:
+                        title = R.string.idle_title;
+                        detail = R.string.idle_detail;
+                }
+                titleView.setText(title);
+                if (detailOverride != null) {
+                    detailView.setText(detailOverride);
+                } else {
+                    detailView.setText(detail);
+                }
+                boolean active = state != State.IDLE;
+                requestCard.setVisibility(active ? View.VISIBLE : View.GONE);
+                cancelButton.setVisibility(active ? View.VISIBLE : View.GONE);
+                updateConnection();
             }
         });
     }
+
+    private void updateConnection() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                boolean on = client != null;
+                connectionView.setText(on ? R.string.computer_connected : R.string.computer_waiting);
+                // Resources.getColor(int) rather than Context.getColor: the latter needs API 23.
+                connectionView.setTextColor(
+                        getResources().getColor(on ? R.color.ok : R.color.warn));
+            }
+        });
+    }
+
+    private void setDetail(final String text) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                detailView.setText(text);
+            }
+        });
+    }
+
+    private void cancel() {
+        pendingUrl = null;
+        send("{\"type\":\"cancel\"}");
+        // Finishing returns to the app, whose sign-in screen treats it as "user cancelled".
+        finish();
+    }
+
+    // ------------------------------------------------------------------ socket
 
     private void startServer() {
         try {
             server = new LocalServerSocket(SOCKET_NAME);
         } catch (IOException e) {
             Log.e(TAG, "cannot bind @" + SOCKET_NAME, e);
-            setStatus("Could not start the relay: " + e.getMessage());
+            show(State.IDLE, getString(R.string.bind_failed));
             return;
         }
-        serverThread = new Thread(new Runnable() {
+        Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
                 acceptLoop();
             }
         }, "oauthrelay-server");
-        serverThread.setDaemon(true);
-        serverThread.start();
+        t.setDaemon(true);
+        t.start();
     }
 
     private void stopServer() {
@@ -219,10 +286,9 @@ public class RelayActivity extends Activity {
     private void serve(LocalSocket s) {
         try {
             client = s.getOutputStream();
+            updateConnection();
             if (pendingUrl != null) {
                 sendOpen();
-            } else {
-                setStatus("Computer connected. Waiting for an app to open a sign-in page.");
             }
             BufferedReader in = new BufferedReader(
                     new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
@@ -235,8 +301,12 @@ public class RelayActivity extends Activity {
         } finally {
             client = null;
             closeQuietly(s);
-            if (!closing && pendingUrl != null) {
-                setStatus("Computer disconnected. Run the command again to continue.");
+            if (!closing) {
+                if (pendingUrl != null) {
+                    show(State.DROPPED, null);
+                } else {
+                    updateConnection();
+                }
             }
         }
     }
@@ -246,7 +316,7 @@ public class RelayActivity extends Activity {
             JSONObject m = new JSONObject(line);
             String type = m.optString("type");
             if ("status".equals(type) || "error".equals(type)) {
-                setStatus(m.optString("text"));
+                setDetail(m.optString("text"));
             } else if ("done".equals(type)) {
                 pendingUrl = null;
                 runOnUiThread(new Runnable() {
@@ -261,10 +331,9 @@ public class RelayActivity extends Activity {
         }
     }
 
-    private synchronized void sendOpen() {
-        OutputStream out = client;
+    private void sendOpen() {
         String url = pendingUrl;
-        if (out == null || url == null) {
+        if (url == null) {
             return;
         }
         try {
@@ -273,11 +342,26 @@ public class RelayActivity extends Activity {
             m.put("type", "open");
             m.put("url", url);
             m.put("referrer", pendingReferrer == null ? JSONObject.NULL : pendingReferrer);
-            out.write((m.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+            if (send(m.toString())) {
+                show(State.SENT, null);
+            }
+        } catch (JSONException e) {
+            Log.w(TAG, "encode failed", e);
+        }
+    }
+
+    private synchronized boolean send(String json) {
+        OutputStream out = client;
+        if (out == null) {
+            return false;
+        }
+        try {
+            out.write((json + "\n").getBytes(StandardCharsets.UTF_8));
             out.flush();
-            setStatus("Sent to your computer. Finish signing in there.");
-        } catch (IOException | JSONException e) {
+            return true;
+        } catch (IOException e) {
             Log.w(TAG, "send failed", e);
+            return false;
         }
     }
 

@@ -1,3 +1,5 @@
+<img src="docs/icon-512.png" alt="" width="96" align="right">
+
 # Login Relay
 
 Sign in to Android apps on a phone that has no web browser.
@@ -24,11 +26,9 @@ session exactly as it would after a normal login.
 
 ## Use it
 
-1. Install the app on the phone (enable USB debugging first):
-
-   ```
-   adb install login-relay.apk
-   ```
+1. Install `login-relay-<version>.apk` from [Releases](https://github.com/clippycoder/oauth-relay/releases)
+   on the phone. Use `adb install login-relay-0.1.0.apk`, or, on a managed phone, add it as an
+   app in the MDM console (details below).
 
 2. With the phone connected (USB or wireless debugging), run the helper on the computer:
 
@@ -76,9 +76,24 @@ Links that aren't sign-ins, such as a "terms of service" link, also open on the 
 Apps that return to an `https://` address (Android App Links) can't be caught this way. For those,
 the helper asks you to paste the final address from the browser's address bar.
 
+## Managed phones (MDM)
+
+Login Relay is an ordinary app with no permissions, so it can be distributed through an MDM like
+any other in-house APK. An MDM that removes sideloaded apps will also remove a copy installed with
+`adb install`, so add it through the console instead.
+
+| | |
+|---|---|
+| Package | `io.github.clippycoder.oauthrelay` |
+| Signing certificate SHA-256 | `d4:3d:3e:98:27:12:3a:56:f0:92:39:e5:32:40:a6:94:b1:ff:8a:3f:73:af:0a:a7:2d:92:e5:42:a1:40:c8:b4` |
+| Permissions | none |
+| Icon for the console | [`docs/icon-512.png`](docs/icon-512.png) |
+
+The phone also needs USB debugging (or wireless debugging) allowed while you sign in, because the
+hand-off runs over adb.
+
 ## Limits
 
-- The phone app is an ordinary install. An MDM that removes sideloaded apps will remove it too.
 - Apps that check for a specific browser package, or that require a working Custom Tabs service,
   may still refuse.
 - Some sign-ins cancel if the app's own screen is resumed before the result arrives. Login Relay
@@ -87,10 +102,27 @@ the helper asks you to paste the final address from the browser's address bar.
 ## Build
 
 ```
-android/build.sh          # bare SDK tools (aapt2, javac, d8, zipalign, apksigner); no Gradle
+android/build.sh              # bare SDK tools (aapt2, javac, d8, zipalign, apksigner); no Gradle
+android/tools/make_icons.py   # re-render the PNG icons after changing the icon (needs Pillow)
 ```
 
-It signs with `KEYSTORE` / `KEYSTORE_PASS` if set, otherwise with the SDK debug key.
+Signing uses `KEYSTORE` / `KEYSTORE_PASS` if set. Otherwise it uses `.signing/release.jks` with
+`.signing/password` if present; that folder is gitignored. Failing both, it uses the SDK debug key.
+Updates must be signed with the same key as the installed version, so keep the release key backed up.
+
+## Protocol
+
+The phone app listens on the abstract unix socket `@oauthrelay` and accepts only uid 0 or 2000.
+The host reaches it with `adb forward tcp:0 localabstract:oauthrelay`. Messages are newline-delimited
+JSON:
+
+| direction | message |
+|---|---|
+| phone → computer | `{"v":1,"type":"open","url":…,"referrer":"android-app://<package>"}` |
+| phone → computer | `{"type":"cancel"}` |
+| computer → phone | `{"type":"status","text":…}`, `{"type":"error","text":…}`, `{"type":"done"}` |
+
+The return address goes back with `adb shell am start -a android.intent.action.VIEW -d <url> -p <package>`.
 
 ## License
 

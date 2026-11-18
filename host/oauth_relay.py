@@ -16,6 +16,7 @@ import ctypes
 import json
 import os
 import plistlib
+import select
 import shlex
 import shutil
 import socket
@@ -28,6 +29,7 @@ import urllib.parse
 import uuid
 import webbrowser
 
+VERSION = "0.1.0"
 PKG = "io.github.clippycoder.oauthrelay"
 SOCKET_NAME = "oauthrelay"
 RELEASES = "https://github.com/clippycoder/oauth-relay/releases"
@@ -368,6 +370,22 @@ class Session:
     def status(self, text):
         self.send(type="status", text=text)
 
+    def cancelled(self):
+        """Non-blocking: True if the phone cancelled or Login Relay was closed."""
+        try:
+            readable, _, _ = select.select([self.sock], [], [], 0)
+            if not readable:
+                return False
+            line = self.reader.readline()
+        except (OSError, ValueError):
+            return True
+        if not line:
+            return True
+        try:
+            return json.loads(line).get("type") == "cancel"
+        except ValueError:
+            return False
+
 
 def handle_open(args, adb, sess, url, referrer):
     q = params(url)
@@ -415,6 +433,9 @@ def handle_open(args, adb, sess, url, referrer):
             log(f"  If your browser asks to open \"Login Relay\", allow it.")
             deadline = time.time() + LOGIN_TIMEOUT
             while callback is None and time.time() < deadline:
+                if sess.cancelled():
+                    log("  Cancelled on the phone.")
+                    return
                 for cb in catcher.poll():
                     cbp = params(cb)
                     if not same_redirect(cb, redirect):
@@ -465,13 +486,15 @@ def main():
     ap.add_argument("--paste", action="store_true",
                     help="don't register a URL handler; paste the final address by hand")
     ap.add_argument("--yes", action="store_true", help="don't ask before non-PKCE sign-ins")
+    ap.add_argument("--version", action="version", version=f"oauth-relay {VERSION}")
     args = ap.parse_args()
 
     adb_path = find_adb()
     adb = Adb(adb_path, pick_device(adb_path, args.serial))
     if not adb.shell(f"pm path {PKG}", check=False).startswith("package:"):
-        sys.exit(f"Login Relay isn't installed on the phone. Get login-relay.apk from {RELEASES} "
-                 f"and run: adb install login-relay.apk")
+        sys.exit(f"Login Relay isn't installed on the phone. Get the APK from {RELEASES} and "
+                 "install it with `adb install <file>.apk`, or through your MDM if the phone is "
+                 "managed.")
 
     port = int(adb.run("forward", "tcp:0", f"localabstract:{SOCKET_NAME}"))
     log(f"Connected to {adb.serial}. Waiting for an app on the phone to open a sign-in page. "
