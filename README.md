@@ -33,11 +33,14 @@ session exactly as it would after a normal login.
 2. With the phone connected (USB or wireless debugging), run the helper on the computer:
 
    ```
-   python3 <(gh api -H 'Accept: application/vnd.github.raw' repos/clippycoder/oauth-relay/contents/host/oauth_relay.py)
+   gh api -H 'Accept: application/vnd.github.raw' repos/clippycoder/oauth-relay/contents/relay.sh | sh
    ```
 
-   The repo is private for now, so that one-liner goes through `gh`. From a clone, run
-   `python3 host/oauth_relay.py` instead.
+   The repo is private for now, so the one-liner goes through `gh`. Once the repo is public it
+   becomes `curl -fsSL https://raw.githubusercontent.com/clippycoder/oauth-relay/main/relay.sh | sh`.
+   `relay.sh` downloads `host/oauth_relay.py` and runs it, so `python3` must be installed. On macOS
+   that comes with the Command Line Tools (`xcode-select --install`). To pass options, use
+   `… | sh -s -- --serial 1234ABCD`. From a clone, run `./relay.sh` or `python3 host/oauth_relay.py`.
 
 3. In the app, sign in as usual. When it opens the sign-in page, Login Relay sends it to the computer.
    Your browser opens it. Sign in, and allow the browser to open "Login Relay" when it asks. The app

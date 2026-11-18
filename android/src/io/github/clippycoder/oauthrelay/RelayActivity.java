@@ -38,8 +38,8 @@ public class RelayActivity extends Activity {
     static final String TAG = "OAuthRelay";
     static final String SOCKET_NAME = "oauthrelay";
     static final String HOST_COMMAND =
-            "python3 <(gh api -H 'Accept: application/vnd.github.raw' "
-            + "repos/clippycoder/oauth-relay/contents/host/oauth_relay.py)";
+            "gh api -H 'Accept: application/vnd.github.raw' "
+            + "repos/clippycoder/oauth-relay/contents/relay.sh | sh";
 
     // Only adb (shell) and root may talk to the relay; any app could otherwise connect to an
     // abstract socket.
