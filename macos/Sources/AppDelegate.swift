@@ -149,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .working(let flow):
                 menu.addItem(item("Cancel \(flow.request.verb)", #selector(cancelFlow)))
             case .noPhone, .unauthorized:
-                break
+                menu.addItem(item("Check Again", #selector(checkAgain)))
             }
         }
 
@@ -200,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showWindow() { window.show() }
     @objc private func installOnPhone() { engine.installPhoneApp() }
     @objc private func openOnPhone() { engine.openOnPhone() }
+    @objc private func checkAgain() { engine.checkAgain() }
     @objc private func cancelFlow() { engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }
     @objc private func downloadPlatformTools() { confirmDownloadPlatformTools() }
     @objc private func pickAdb() { chooseAdb() }

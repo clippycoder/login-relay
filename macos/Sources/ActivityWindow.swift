@@ -125,7 +125,7 @@ final class ActivityWindowController: NSWindowController {
         case .working:
             offer(actionButton, "Cancel", { self.engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }, primary: true)
         case .noPhone, .unauthorized:
-            break
+            offer(actionButton, "Check Again", { self.engine.checkAgain() }, primary: true)
         }
         if engine.busy != nil { actionButton.isEnabled = false } else { actionButton.isEnabled = true }
 
@@ -144,7 +144,10 @@ final class ActivityWindowController: NSWindowController {
         case .noPhone:
             return ("No phone connected", "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).")
         case .unauthorized(let d):
-            return ("\(d.title) is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt.")
+            if d.state == "unauthorized" {
+                return ("\(d.title) is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt.")
+            }
+            return ("\(d.title) isn't responding (\(d.state))", "Unplug the cable and plug it back in, then choose Check Again.")
         case .needsApp(let d):
             return ("Login Relay isn't on \(d.title)",
                     engine.bundledAPK != nil ? "Install it on the phone to start." : "Install login-relay.apk on the phone.")

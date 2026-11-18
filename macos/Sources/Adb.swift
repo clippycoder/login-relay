@@ -56,32 +56,36 @@ final class Adb {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: launchPath)
         p.arguments = args
-        let outPipe = Pipe(), errPipe = Pipe()
-        p.standardOutput = outPipe
-        p.standardError = errPipe
         p.standardInput = FileHandle.nullDevice
-        var outData = Data(), errData = Data()
-        let group = DispatchGroup()
+        // Output goes to temp files, not pipes. When adb has to start its server it forks a daemon
+        // that inherits our stdout/stderr; with pipes we'd wait for end-of-file until that daemon
+        // exits, i.e. forever.
+        let fm = FileManager.default
+        let id = UUID().uuidString
+        let outURL = fm.temporaryDirectory.appendingPathComponent("loginrelay-\(id).out")
+        let errURL = fm.temporaryDirectory.appendingPathComponent("loginrelay-\(id).err")
+        fm.createFile(atPath: outURL.path, contents: nil)
+        fm.createFile(atPath: errURL.path, contents: nil)
+        defer { try? fm.removeItem(at: outURL); try? fm.removeItem(at: errURL) }
+        guard let outH = try? FileHandle(forWritingTo: outURL), let errH = try? FileHandle(forWritingTo: errURL) else {
+            return ProcessResult(status: -1, out: "", err: "couldn't create temp files")
+        }
+        p.standardOutput = outH
+        p.standardError = errH
         do { try p.run() } catch {
             return ProcessResult(status: -1, out: "", err: "\(error)")
-        }
-        // Drain both pipes concurrently so a chatty child can't fill a pipe and deadlock.
-        for (pipe, isOut) in [(outPipe, true), (errPipe, false)] {
-            group.enter()
-            DispatchQueue.global().async {
-                let d = pipe.fileHandleForReading.readDataToEndOfFile()
-                if isOut { outData = d } else { errData = d }
-                group.leave()
-            }
         }
         let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
         p.waitUntilExit()
         killer.cancel()
-        group.wait()
-        return ProcessResult(status: p.terminationStatus,
-                             out: String(decoding: outData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines),
-                             err: String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        try? outH.close()
+        try? errH.close()
+        func text(_ url: URL) -> String {
+            String(decoding: (try? Data(contentsOf: url)) ?? Data(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return ProcessResult(status: p.terminationStatus, out: text(outURL), err: text(errURL))
     }
 
     // MARK: phone queries
@@ -89,7 +93,8 @@ final class Adb {
     func devices() -> [Device] {
         let r = run(["devices", "-l"], timeout: 15)
         guard r.ok else { return [] }
-        return r.out.split(separator: "\n").dropFirst().compactMap { line in
+        return r.out.split(separator: "\n").compactMap { line in
+            if line.hasPrefix("*") || line.hasPrefix("List of devices") { return nil }
             let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
             guard parts.count >= 2 else { return nil }
             let model = parts.first { $0.hasPrefix("model:") }.map { String($0.dropFirst(6)) } ?? ""

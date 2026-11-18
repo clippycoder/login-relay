@@ -68,6 +68,9 @@ final class RelayEngine {
 
     // MARK: background loop state
     private var stopping = false
+    private var generation = 0                 // bumped to abandon a stuck loop thread
+    private var lastTick = Date()              // last time the loop made progress
+    private var watchdog: Timer?
     private var forceCheck = false
     private let wake = DispatchSemaphore(value: 0)
     private var currentLink: PhoneLink?
@@ -77,11 +80,26 @@ final class RelayEngine {
     // MARK: lifecycle
 
     func start() {
-        let t = Thread { [weak self] in self?.loop() }
+        startLoop()
+        // If the polling thread ever stops making progress (adb wedged, a missed wake-up), say so
+        // and start over instead of showing a stale state forever.
+        watchdog = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            guard let self, !self.stopping, self.secondsSinceTick > 30 else { return }
+            self.log("Checking for the phone got stuck; starting over.")
+            self.currentLink?.close()
+            self.startLoop()
+        }
+        log("Started.")
+    }
+
+    private func startLoop() {
+        generation += 1
+        let gen = generation
+        tick()
+        let t = Thread { [weak self] in self?.loop(gen: gen) }
         t.name = "relay-loop"
         t.start()
         thread = t
-        log("Started.")
     }
 
     func shutdown() {
@@ -92,6 +110,12 @@ final class RelayEngine {
         if let adb, let device {
             if let port = existingForward(adb, serial: device.serial) { adb.removeForward(port, serial: device.serial) }
         }
+    }
+
+    /// "Check Again" in the menu.
+    func checkAgain() {
+        log("Checking for the phone…")
+        refreshNow()
     }
 
     func refreshNow() {
@@ -112,11 +136,13 @@ final class RelayEngine {
 
     // MARK: background loop
 
-    private func loop() {
+    private func loop(gen: Int) {
         var lastCheck = Date.distantPast
         var port: UInt16?
         var ready: Device?
-        while !stopping {
+        var adb: Adb?
+        while !stopping, gen == generation {
+            tick()
             stateLock.lock()
             let due = forceCheck || Date().timeIntervalSince(lastCheck) >= 3
             forceCheck = false
@@ -125,6 +151,7 @@ final class RelayEngine {
             if due {
                 lastCheck = Date()
                 let found = Adb.locate(userChoice: Prefs.adbPath).map(Adb.init(path:))
+                adb = found
                 var devs: [Device] = [], chosen: Device?, version: String?
                 port = nil
                 if let found {
@@ -136,7 +163,9 @@ final class RelayEngine {
                     }
                 }
                 ready = (version != nil && port != nil) ? chosen : nil
-                DispatchQueue.main.async { self.publish(adb: found, devices: devs, device: chosen, version: version) }
+                DispatchQueue.main.async {
+                    if gen == self.generation { self.publish(adb: found, devices: devs, device: chosen, version: version) }
+                }
             }
 
             if let port, let ready {
@@ -152,13 +181,35 @@ final class RelayEngine {
                 }
                 if link.open(port: port) {
                     DispatchQueue.main.async { self.linkOpened(link) }
-                    closed.wait()
+                    // adb can hold a connection open without it reaching the phone (for instance
+                    // while a replugged phone is still reconnecting), so keep checking that the
+                    // phone is really there rather than waiting for the link to end on its own.
+                    while closed.wait(timeout: .now() + 3) == .timedOut {
+                        tick()
+                        if stopping || gen != generation { link.close(); break }
+                        let here = adb?.devices() ?? []
+                        if !here.contains(where: { $0.serial == ready.serial && $0.isUsable }) {
+                            link.close()
+                            break
+                        }
+                    }
                     lastCheck = .distantPast  // look at the phone again straight away
                     continue
                 }
             }
             _ = wake.wait(timeout: .now() + 1)
         }
+    }
+
+    /// Progress marker for the watchdog. Written from the loop thread directly (not via the main
+    /// thread), so a long modal dialog on the main thread can't make a healthy loop look stuck.
+    private func tick() {
+        stateLock.lock(); lastTick = Date(); stateLock.unlock()
+    }
+
+    private var secondsSinceTick: TimeInterval {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return Date().timeIntervalSince(lastTick)
     }
 
     private func choose(_ devs: [Device]) -> Device? {
@@ -192,6 +243,9 @@ final class RelayEngine {
         if self.adb?.path != adb?.path {
             log(adb == nil ? "adb not found." : "Using adb at \(adb!.path).")
         }
+        if self.devices != devices, !devices.isEmpty {
+            log("adb lists: " + devices.map { "\($0.serial) (\($0.state))" }.joined(separator: ", "))
+        }
         if self.device != device {
             log(device.map { "Phone: \($0.title) (\($0.serial))" } ?? "No phone.")
         }
@@ -209,11 +263,12 @@ final class RelayEngine {
     private func linkOpened(_ link: PhoneLink) {
         currentLink = link
         linked = true
+        log("Linked to Login Relay on the phone.")
         onChange?()
     }
 
     private func linkClosed(_ link: PhoneLink) {
-        if currentLink === link { currentLink = nil; linked = false }
+        if currentLink === link { currentLink = nil; linked = false; log("Link to the phone closed.") }
         if active?.link === link { cancelActive("The phone closed Login Relay.", notifyPhone: false) }
         onChange?()
     }
