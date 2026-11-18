@@ -62,6 +62,7 @@ public class RelayActivity extends Activity {
     private volatile String pendingReferrer;
     private volatile boolean closing;
     private volatile OutputStream client;
+    private volatile LocalSocket clientSocket;
     private LocalServerSocket server;
 
     @Override
@@ -250,6 +251,22 @@ public class RelayActivity extends Activity {
             server.close();
         } catch (IOException ignored) {
         }
+        // Also drop the computer's connection; otherwise the helper stays attached to this dead
+        // instance and never reaches the next Login Relay screen.
+        // close() alone neither wakes the thread blocked reading it nor sends EOF to adb;
+        // shutdown does both.
+        LocalSocket c = clientSocket;
+        if (c != null) {
+            try {
+                c.shutdownInput();
+            } catch (IOException ignored) {
+            }
+            try {
+                c.shutdownOutput();
+            } catch (IOException ignored) {
+            }
+            closeQuietly(c);
+        }
     }
 
     private void acceptLoop() {
@@ -284,6 +301,7 @@ public class RelayActivity extends Activity {
     }
 
     private void serve(LocalSocket s) {
+        clientSocket = s;
         try {
             client = s.getOutputStream();
             updateConnection();
@@ -300,6 +318,7 @@ public class RelayActivity extends Activity {
             Log.w(TAG, "client dropped", e);
         } finally {
             client = null;
+            clientSocket = null;
             closeQuietly(s);
             if (!closing) {
                 if (pendingUrl != null) {
