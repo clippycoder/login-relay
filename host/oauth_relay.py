@@ -29,7 +29,7 @@ import urllib.parse
 import uuid
 import webbrowser
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PKG = "io.github.clippycoder.oauthrelay"
 SOCKET_NAME = "oauthrelay"
 RELEASES = "https://github.com/clippycoder/oauth-relay/releases"
@@ -389,7 +389,12 @@ class Session:
 
 def handle_open(args, adb, sess, url, referrer):
     q = params(url)
+    # Where the page sends the browser back to the app. Sign-in uses redirect_uri; sign-out uses
+    # post_logout_redirect_uri (OpenID Connect) or returnTo (Auth0's /v2/logout).
     redirect = q.get("redirect_uri")
+    signing_in = redirect is not None
+    if not signing_in:
+        redirect = q.get("post_logout_redirect_uri") or q.get("returnTo")
     caller = None
     if referrer and referrer.startswith("android-app://"):
         caller = referrer[len("android-app://"):].split("/")[0] or None
@@ -403,8 +408,10 @@ def handle_open(args, adb, sess, url, referrer):
         return
 
     host = urllib.parse.urlsplit(url).hostname
-    log(f"\nSign-in requested by {caller or 'an app'} at {host}")
-    if "code_challenge" not in q:
+    what = "Sign-in" if signing_in else "Sign-out"
+    log(f"\n{what} requested by {caller or 'an app'} at {host}")
+    # Only an authorization-code sign-in hands a secret back; sign-out returns nothing to redeem.
+    if signing_in and "code" in q.get("response_type", "code") and "code_challenge" not in q:
         log("  Warning: this sign-in does not use PKCE, so the code passing through this computer "
             "could be used on its own.")
         if not args.yes and input("  Continue anyway? [y/N] ").strip().lower() != "y":
@@ -425,8 +432,9 @@ def handle_open(args, adb, sess, url, referrer):
             catcher = None
 
     try:
-        sess.status("Finish signing in on your computer.")
-        log("  Opening the sign-in page in your browser…")
+        sess.status("Finish signing in on your computer." if signing_in
+                    else "Finishing sign-out on your computer.")
+        log("  Opening the page in your browser…")
         webbrowser.open(url)
         callback = None
         if catcher:
@@ -456,7 +464,7 @@ def handle_open(args, adb, sess, url, referrer):
                 else:
                     log("  That isn't the app's return address; try again.")
         if callback is None:
-            sess.send(type="error", text="Timed out waiting for the sign-in.")
+            sess.send(type="error", text="Timed out waiting for the browser.")
             log("  Timed out.")
             return
     finally:
@@ -473,7 +481,7 @@ def handle_open(args, adb, sess, url, referrer):
         log(f"  The phone could not deliver the result: {out}")
         sess.send(type="error", text="Could not hand the result back to the app.")
         return
-    log("  Sent back to the phone; the app is finishing the sign-in.")
+    log(f"  Sent back to the phone; the app is finishing the {what.lower()}.")
     # Let the app's own activity take the result before Login Relay closes.
     time.sleep(1.5)
     sess.send(type="done")
