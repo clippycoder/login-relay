@@ -459,7 +459,7 @@ def handle_open(args, adb, sess, url, referrer):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Finish a phone app's browser sign-in on this "
+    ap = argparse.ArgumentParser(prog="oauth-relay", description="Finish a phone app's browser sign-in on this "
                                              "computer, over adb.")
     ap.add_argument("--serial", help="adb serial of the phone, if several are connected")
     ap.add_argument("--paste", action="store_true",
