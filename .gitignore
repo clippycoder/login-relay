@@ -1,0 +1,6 @@
+android/build/
+__pycache__/
+*.jks
+*.keystore
+.signing/
+.DS_Store
