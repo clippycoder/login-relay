@@ -19,6 +19,7 @@ import plistlib
 import select
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -496,6 +497,12 @@ def main():
     ap.add_argument("--yes", action="store_true", help="don't ask before non-PKCE sign-ins")
     ap.add_argument("--version", action="version", version=f"oauth-relay {VERSION}")
     args = ap.parse_args()
+
+    # Closing the terminal (SIGHUP) or `kill` (SIGTERM) must still remove the URL handler and the
+    # adb forward; SystemExit unwinds through the same finally blocks as Ctrl-C.
+    for sig in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, sig):
+            signal.signal(getattr(signal, sig), lambda *_: sys.exit(0))
 
     adb_path = find_adb()
     adb = Adb(adb_path, pick_device(adb_path, args.serial))
