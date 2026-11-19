@@ -128,7 +128,17 @@ final class RelayEngine {
     func log(_ text: String) {
         logLines.append((Date(), text))
         if logLines.count > 300 { logLines.removeFirst(logLines.count - 300) }
-        if verbose { fputs("[\(ISO8601DateFormatter().string(from: Date()))] \(text)\n", stderr) }
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(text)\n"
+        if verbose { fputs(line, stderr) }
+        // Test hook: LOGINRELAY_LOG=<file> appends every log line (CI shows it when a test fails).
+        if let path = ProcessInfo.processInfo.environment["LOGINRELAY_LOG"], !path.isEmpty {
+            if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+            if let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile()
+                h.write(Data(line.utf8))
+                try? h.close()
+            }
+        }
         onChange?()
     }
 

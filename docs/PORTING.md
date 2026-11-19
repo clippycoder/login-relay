@@ -170,6 +170,7 @@ app's own data folder.
 
 - `LOGINRELAY_ADB=<path>`: use exactly this adb.
 - `LOGINRELAY_BROWSER=none`: don't open the sign-in page in a browser.
+- `LOGINRELAY_LOG=<file>`: also append every activity-log line to this file.
 
 ## Verifying a port
 
