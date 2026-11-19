@@ -119,16 +119,27 @@ namespace LoginRelay.Core
                 _closed = true;
                 s = _socket;
             }
+            if (s == null)
+            {
+                return;
+            }
             try
             {
-                if (s != null)
-                {
-                    s.Shutdown(SocketShutdown.Both);
-                }
+                s.Shutdown(SocketShutdown.Both);
             }
             catch (Exception)
             {
                 // Already closed, or the read thread disposed it first.
+            }
+            try
+            {
+                // Shutdown wakes a thread blocked in Receive on Linux and macOS but not on Windows,
+                // where only closing the socket aborts the pending call. The read loop then sees the
+                // exception, ends, and reports OnClose.
+                s.Dispose();
+            }
+            catch (Exception)
+            {
             }
         }
 
