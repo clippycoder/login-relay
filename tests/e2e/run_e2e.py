@@ -51,7 +51,13 @@ def open_like_a_browser(url):
     elif sys.platform == "darwin":
         subprocess.run(["open", url], check=False)
     else:
-        subprocess.run(["xdg-open", url], check=False, timeout=30)
+        # With no handler registered (after a cancel, say) xdg-open can hunt for a browser and hang
+        # on a headless machine; that's not the app's problem, so don't wait for it.
+        opener = subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            opener.wait(10)
+        except subprocess.TimeoutExpired:
+            opener.kill()
 
 
 def claim_holder():
