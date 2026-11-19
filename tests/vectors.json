@@ -1,0 +1,284 @@
+{
+ "_comment": "Shared by the Swift, C# and Python implementations. Absent expectations are not checked; null means 'must be absent'.",
+ "requests": [
+  {
+   "name": "sign-in with PKCE",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "label": "Example",
+   "expect": {
+    "kind": "signIn",
+    "redirect": "com.example.app://login.example.com/android/callback",
+    "state": "S 1",
+    "caller": "com.example.app",
+    "appName": "Example",
+    "catchableScheme": "com.example.app",
+    "lacksPKCE": false,
+    "host": "login.example.com"
+   }
+  },
+  {
+   "name": "label missing falls back to the package",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "label": null,
+   "expect": {
+    "appName": "com.example.app",
+    "caller": "com.example.app"
+   }
+  },
+  {
+   "name": "empty label is ignored",
+   "url": "https://example.com",
+   "referrer": null,
+   "label": "",
+   "expect": {
+    "appName": "An app",
+    "kind": "plainLink"
+   }
+  },
+  {
+   "name": "Auth0 sign-out uses returnTo",
+   "url": "https://login.example.com/v2/logout?client_id=y&returnTo=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "label": null,
+   "expect": {
+    "kind": "signOut",
+    "redirect": "com.example.app://login.example.com/android/callback",
+    "state": null,
+    "lacksPKCE": false,
+    "catchableScheme": "com.example.app"
+   }
+  },
+  {
+   "name": "OpenID sign-out uses post_logout_redirect_uri",
+   "url": "https://idp.example.com/logout?post_logout_redirect_uri=myapp%3A%2Fdone",
+   "referrer": "android-app://my.app",
+   "label": null,
+   "expect": {
+    "kind": "signOut",
+    "catchableScheme": "myapp",
+    "caller": "my.app"
+   }
+  },
+  {
+   "name": "authorization code without PKCE is flagged",
+   "url": "https://x.example/authorize?response_type=code&redirect_uri=app%3A%2F%2Fcb",
+   "referrer": null,
+   "label": null,
+   "expect": {
+    "kind": "signIn",
+    "lacksPKCE": true,
+    "catchableScheme": "app"
+   }
+  },
+  {
+   "name": "implicit flow is not a PKCE concern",
+   "url": "https://x.example/authorize?response_type=token&redirect_uri=app%3A%2F%2Fcb",
+   "referrer": null,
+   "label": null,
+   "expect": {
+    "lacksPKCE": false
+   }
+  },
+  {
+   "name": "https return address is not catchable",
+   "url": "https://x.example/authorize?redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_challenge=z",
+   "referrer": "android-app://a.b",
+   "label": null,
+   "expect": {
+    "kind": "signIn",
+    "catchableScheme": null,
+    "redirect": "https://app.example/cb"
+   }
+  },
+  {
+   "name": "plain link",
+   "url": "https://example.com/terms",
+   "referrer": "android-app://com.a.b/something",
+   "label": null,
+   "expect": {
+    "kind": "plainLink",
+    "redirect": null,
+    "caller": "com.a.b",
+    "host": "example.com"
+   }
+  },
+  {
+   "name": "no referrer",
+   "url": "https://example.com",
+   "referrer": null,
+   "label": null,
+   "expect": {
+    "caller": null
+   }
+  },
+  {
+   "name": "non-app referrer is ignored",
+   "url": "https://example.com",
+   "referrer": "https://evil.example",
+   "label": null,
+   "expect": {
+    "caller": null
+   }
+  }
+ ],
+ "accepts": [
+  {
+   "name": "good callback",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "com.example.app://login.example.com/android/callback?code=abc&state=S%201",
+   "expect": "ok"
+  },
+  {
+   "name": "scheme case and trailing slash don't matter",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "COM.EXAMPLE.APP://login.example.com/android/callback/?code=1&state=S%201",
+   "expect": "ok"
+  },
+  {
+   "name": "wrong state",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "com.example.app://login.example.com/android/callback?code=1&state=other",
+   "expect": "stateMismatch"
+  },
+  {
+   "name": "missing state",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "com.example.app://login.example.com/android/callback?code=1",
+   "expect": "stateMismatch"
+  },
+  {
+   "name": "other scheme",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "com.other.app://login.example.com/android/callback?state=S%201",
+   "expect": "unrelated"
+  },
+  {
+   "name": "other path",
+   "url": "https://login.example.com/authorize?client_id=x&response_type=code&state=S%201&code_challenge=abc&redirect_uri=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "com.example.app://elsewhere/callback?state=S%201",
+   "expect": "unrelated"
+  },
+  {
+   "name": "sign-out needs no state",
+   "url": "https://login.example.com/v2/logout?client_id=y&returnTo=com.example.app%3A%2F%2Flogin.example.com%2Fandroid%2Fcallback",
+   "referrer": "android-app://com.example.app",
+   "callback": "com.example.app://login.example.com/android/callback",
+   "expect": "ok"
+  },
+  {
+   "name": "https callback matches when pasted",
+   "url": "https://x.example/authorize?redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_challenge=z",
+   "referrer": "android-app://a.b",
+   "callback": "https://app.example/cb?code=1",
+   "expect": "ok"
+  },
+  {
+   "name": "plain links accept nothing",
+   "url": "https://example.com/terms",
+   "referrer": null,
+   "callback": "https://example.com/terms",
+   "expect": "unrelated"
+  }
+ ],
+ "urlParams": [
+  {
+   "name": "query and fragment",
+   "url": "app://cb?a=1&b=two%20words#access_token=t&state=s",
+   "expect": {
+    "a": "1",
+    "b": "two words",
+    "access_token": "t",
+    "state": "s"
+   }
+  },
+  {
+   "name": "first value wins",
+   "url": "app://cb?a=1&a=2",
+   "expect": {
+    "a": "1"
+   }
+  },
+  {
+   "name": "plus is a space in values",
+   "url": "app://cb?q=a+b",
+   "expect": {
+    "q": "a b"
+   }
+  },
+  {
+   "name": "no query",
+   "url": "app://cb",
+   "expect": {}
+  },
+  {
+   "name": "key without value",
+   "url": "app://cb?flag&x=1",
+   "expect": {
+    "flag": "",
+    "x": "1"
+   }
+  }
+ ],
+ "shellQuote": [
+  [
+   "a b",
+   "'a b'"
+  ],
+  [
+   "it's",
+   "'it'\"'\"'s'"
+  ],
+  [
+   "x;rm -rf /",
+   "'x;rm -rf /'"
+  ],
+  [
+   "",
+   "''"
+  ],
+  [
+   "com.example.relaytest://cb?code=a'b&state=x y",
+   "'com.example.relaytest://cb?code=a'\"'\"'b&state=x y'"
+  ]
+ ],
+ "versionLess": [
+  [
+   "0.2.2",
+   "0.3.0",
+   true
+  ],
+  [
+   "0.3.0",
+   "0.3.0",
+   false
+  ],
+  [
+   "0.10.0",
+   "0.9.9",
+   false
+  ],
+  [
+   "0.3",
+   "0.3.1",
+   true
+  ],
+  [
+   "1.0.0",
+   "0.99.99",
+   false
+  ],
+  [
+   "0.3.0",
+   "0.2.2",
+   false
+  ]
+ ]
+}

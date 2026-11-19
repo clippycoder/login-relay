@@ -6,4 +6,4 @@ cd "$(dirname "$0")"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -swift-version 5 -o "$out/tests" ../Sources/Redirect.swift main.swift
-"$out/tests"
+"$out/tests" ../../tests/vectors.json

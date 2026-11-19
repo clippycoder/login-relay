@@ -322,7 +322,10 @@ final class RelayEngine {
         }
         link.send(["type": "status",
                    "text": request.kind == .signIn ? "Finish signing in on your computer." : "Finishing sign-out on your computer."])
-        if let url = URL(string: request.url) { NSWorkspace.shared.open(url) }
+        // Test hook: the end-to-end tests set LOGINRELAY_BROWSER=none so no browser opens.
+        if ProcessInfo.processInfo.environment["LOGINRELAY_BROWSER"] != "none", let url = URL(string: request.url) {
+            NSWorkspace.shared.open(url)
+        }
         log("Opened the page in your browser. If it asks to open Login Relay, allow it.")
         notify(title: "\(request.appName) \(request.verb)", body: "Continue in your browser.")
         onChange?()

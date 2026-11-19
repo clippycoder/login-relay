@@ -22,6 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RES = os.path.join(HERE, "..", "res")
 DOCS = os.path.join(HERE, "..", "..", "docs")
 MAC = os.path.join(HERE, "..", "..", "macos", "Resources")
+WIN = os.path.join(HERE, "..", "..", "windows", "Resources")
+LINUX = os.path.join(HERE, "..", "..", "linux", "data")
 
 LEGACY = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
 
@@ -119,6 +121,29 @@ def menubar_icon(px, active):
     return img
 
 
+def tray_icon(size, state):
+    """Colored round tray icon, readable on light and dark panels. state: ready | off | active."""
+    img = legacy_icon(size)
+    if state == "off":
+        # Desaturate and fade: the phone isn't ready.
+        gray = img.convert("LA").convert("RGBA")
+        gray.putalpha(img.getchannel("A").point(lambda a: int(a * 0.55)))
+        return gray
+    if state == "active":
+        big = size * SS
+        layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        r, ring = big * 0.20, big * 0.27
+        cx, cy = big * 0.76, big * 0.76
+        d.ellipse((cx - ring, cy - ring, cx + ring, cy + ring), fill=(255, 255, 255, 255))
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(0xFF, 0x8F, 0x00, 255))
+        layer = layer.resize((size, size), Image.LANCZOS)
+        out = img.copy()
+        out.alpha_composite(layer)
+        return out
+    return img
+
+
 def main():
     for density, px in LEGACY.items():
         out = os.path.join(RES, f"mipmap-{density}")
@@ -137,10 +162,25 @@ def main():
     for active, tag in ((False, "MenuBarIcon"), (True, "MenuBarIconActive")):
         menubar_icon(22, active).save(os.path.join(MAC, f"{tag}.png"))
         menubar_icon(44, active).save(os.path.join(MAC, f"{tag}@2x.png"))
+    # Windows: .ico files with the sizes the shell asks for.
+    os.makedirs(WIN, exist_ok=True)
+    ico_sizes = [(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (256, 256)]
+    master.save(os.path.join(WIN, "app.ico"), format="ICO", sizes=ico_sizes)
+    for state, name in (("ready", "tray"), ("off", "tray-off"), ("active", "tray-active")):
+        tray_icon(256, state).save(os.path.join(WIN, f"{name}.ico"), format="ICO", sizes=ico_sizes)
+    # Linux: freedesktop icon theme sizes plus tray icons (a path + name for the indicator).
+    for px in (16, 22, 24, 32, 48, 64, 128, 256, 512):
+        d = os.path.join(LINUX, "icons", "hicolor", f"{px}x{px}", "apps")
+        os.makedirs(d, exist_ok=True)
+        master.resize((px, px), Image.LANCZOS).save(os.path.join(d, "io.github.clippycoder.LoginRelay.png"), optimize=True)
+    tray_dir = os.path.join(LINUX, "tray")
+    os.makedirs(tray_dir, exist_ok=True)
+    for state, name in (("ready", "loginrelay-tray"), ("off", "loginrelay-tray-off"), ("active", "loginrelay-tray-active")):
+        tray_icon(64, state).save(os.path.join(tray_dir, f"{name}.png"), optimize=True)
     if shutil.which("iconutil"):
         subprocess.run(["iconutil", "-c", "icns", iconset, "-o", os.path.join(MAC, "AppIcon.icns")], check=True)
         shutil.rmtree(iconset)
-    print("wrote mipmap-*/ic_launcher.png, docs/icon-512.png and macos/Resources icons")
+    print("wrote mipmap-*/ic_launcher.png, docs/icon-512.png, and the macOS, Windows and Linux icons")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ final class Adb {
     static func locate(userChoice: String?) -> String? {
         let home = NSHomeDirectory()
         var candidates: [String] = []
+        // Test hook: the end-to-end tests (tests/e2e) point the app at a fake adb.
+        if let forced = ProcessInfo.processInfo.environment["LOGINRELAY_ADB"], !forced.isEmpty { return forced }
         if let userChoice { candidates.append(userChoice) }
         candidates.append(AdbInstaller.installedPath)
         for key in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
