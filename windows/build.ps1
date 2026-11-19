@@ -14,7 +14,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
-$Version = '0.3.0'
+$Version = '0.4.0'
 $Publish = Join-Path $PSScriptRoot 'publish'
 $Zip = Join-Path $Publish "Login-Relay-Windows-x64-$Version.zip"
 

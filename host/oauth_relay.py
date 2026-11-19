@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""oauth-relay host: finish a phone app's browser sign-in on this computer.
+"""Login Relay command-line helper: finish a phone app's browser sign-in on this computer.
 
 The Login Relay app on the phone stands in for a browser. When an app opens a sign-in page,
 Login Relay serves it on the abstract socket @oauthrelay. This script reaches that socket with
@@ -33,7 +33,7 @@ import webbrowser
 VERSION = "0.1.1"
 PKG = "io.github.clippycoder.oauthrelay"
 SOCKET_NAME = "oauthrelay"
-RELEASES = "https://github.com/clippycoder/oauth-relay/releases"
+RELEASES = "https://github.com/clippycoder/login-relay/releases"
 LOGIN_TIMEOUT = 15 * 60
 
 
@@ -489,13 +489,13 @@ def handle_open(args, adb, sess, url, referrer):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="oauth-relay", description="Finish a phone app's browser sign-in on this "
+    ap = argparse.ArgumentParser(prog="login-relay", description="Finish a phone app's browser sign-in on this "
                                              "computer, over adb.")
     ap.add_argument("--serial", help="adb serial of the phone, if several are connected")
     ap.add_argument("--paste", action="store_true",
                     help="don't register a URL handler; paste the final address by hand")
     ap.add_argument("--yes", action="store_true", help="don't ask before non-PKCE sign-ins")
-    ap.add_argument("--version", action="version", version=f"oauth-relay {VERSION}")
+    ap.add_argument("--version", action="version", version=f"login-relay {VERSION}")
     args = ap.parse_args()
 
     # Closing the terminal (SIGHUP) or `kill` (SIGTERM) must still remove the URL handler and the

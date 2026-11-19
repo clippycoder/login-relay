@@ -306,6 +306,12 @@ final class RelayEngine {
         if active != nil { cancelActive("Replaced by a newer request.", notifyPhone: false) }
         log("\(request.appName) wants to open a \(request.verb) page\(request.host.map { " at \($0)" } ?? "").")
 
+        if !isWebURL(request.url) {
+            log("Refused to open a link that isn't a web page.")
+            link.send(["type": "error", "text": "That kind of link can't be opened on the computer."])
+            return
+        }
+
         if request.kind == .plainLink {
             if let url = URL(string: request.url) { NSWorkspace.shared.open(url) }
             link.send(["type": "status", "text": "Opened on your computer."])

@@ -39,9 +39,8 @@ import java.nio.charset.StandardCharsets;
 public class RelayActivity extends Activity {
     static final String TAG = "OAuthRelay";
     static final String SOCKET_NAME = "oauthrelay";
-    static final String HOST_COMMAND =
-            "gh api -H 'Accept: application/vnd.github.raw' "
-            + "repos/clippycoder/oauth-relay/contents/relay.sh | sh";
+    // Where to get the computer side. Shown on the phone's own screen.
+    static final String HOST_COMMAND = "github.com/clippycoder/login-relay";
 
     // Only adb (shell) and root may talk to the relay; any app could otherwise connect to an
     // abstract socket.

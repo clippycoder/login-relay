@@ -60,6 +60,13 @@ func sameRedirect(_ callback: String, _ redirect: String) -> Bool {
     return a.scheme == b.scheme && a.rest == b.rest
 }
 
+/// Only web pages are opened in the browser; a file: or custom-scheme address from the phone could
+/// otherwise launch an arbitrary program on the computer.
+func isWebURL(_ url: String) -> Bool {
+    let s = urlScheme(url)
+    return s == "http" || s == "https"
+}
+
 func urlScheme(_ url: String) -> String? {
     guard let colon = url.firstIndex(of: ":") else { return nil }
     let s = String(url[..<colon]).lowercased()

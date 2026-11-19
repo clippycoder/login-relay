@@ -9,7 +9,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>LoginRelay</AssemblyName>
     <RootNamespace>LoginRelay.App</RootNamespace>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <AssemblyTitle>Login Relay</AssemblyTitle>
     <Product>Login Relay</Product>
     <Description>Finishes browser sign-ins for Android phones that have no browser.</Description>

@@ -78,7 +78,7 @@ Installed-Size: $size
 Maintainer: clippycoder <clippycoder@users.noreply.github.com>
 Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, adb | android-tools-adb
 Recommends: xdg-utils
-Homepage: https://github.com/clippycoder/oauth-relay
+Homepage: https://github.com/clippycoder/login-relay
 Description: Browser sign-ins for Android phones that have no browser
  Login Relay answers an Android app's request to open a sign-in page on a
  USB-connected phone by opening the page in this computer's browser, catching

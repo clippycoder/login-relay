@@ -70,6 +70,10 @@ check(shellQuote("a b") == "'a b'", "quote simple")
 check(shellQuote("it's") == "'it'\"'\"'s'", "quote apostrophe")
 check(shellQuote("x;rm -rf /") == "'x;rm -rf /'", "quote metachars")
 
+// only web pages get opened
+check(isWebURL("https://example.com/a?b=c") && isWebURL("HTTP://example.com"), "web URLs")
+check(!isWebURL("file:///etc/passwd") && !isWebURL("com.example.app://cb") && !isWebURL("javascript:alert(1)") && !isWebURL("no scheme"), "non-web URLs refused")
+
 // version comparison
 check(versionLess("0.2.2", "0.3.0"), "0.2.2 < 0.3.0")
 check(!versionLess("0.3.0", "0.3.0"), "equal isn't less")

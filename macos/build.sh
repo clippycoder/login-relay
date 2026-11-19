@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION=0.3.0
+VERSION=0.4.0
 BUILD=1
 APK=../android/build/login-relay.apk
 PHONE_VERSION="$(sed -n 's/^VERSION_NAME=//p' ../android/build.sh)"
