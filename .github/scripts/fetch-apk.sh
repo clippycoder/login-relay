@@ -16,8 +16,11 @@ gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'login-relay-*.
 apk="$(ls apk/login-relay-*.apk | head -1)"
 version="$(basename "$apk" .apk)"; version="${version#login-relay-}"
 echo "phone app $version from release $tag"
+apk_path="$(pwd)/$apk"
+# Under Git Bash on Windows `pwd` is /d/a/..., which PowerShell can't open.
+if command -v cygpath >/dev/null 2>&1; then apk_path="$(cygpath -w "$apk_path")"; fi
 {
-  echo "LOGINRELAY_APK=$(pwd)/$apk"
+  echo "LOGINRELAY_APK=$apk_path"
   echo "PHONE_VERSION=$version"
   echo "RELEASE_TAG_USED=$tag"
 } >> "$GITHUB_ENV"

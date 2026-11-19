@@ -55,6 +55,9 @@ if (Test-Path -LiteralPath $Apk) {
     } else {
         Write-Warning 'Could not work out the phone app version; the app will not offer updates.'
     }
+} elseif ($env:GITHUB_ACTIONS -eq 'true') {
+    # A release without the phone app can't install it; don't let CI ship one quietly.
+    throw "$Apk not found; refusing to build a package without the phone app inside."
 } else {
     Write-Warning "$Apk not found; building without the phone app inside (run android\build.sh first)."
 }

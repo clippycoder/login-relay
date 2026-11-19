@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 
 VERSION_CODE=6
 VERSION_NAME=0.3.1
-MIN_SDK=21
+MIN_SDK=22
 TARGET_SDK=34
 
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"

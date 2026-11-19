@@ -7,12 +7,17 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Also attach the Windows and Linux builds to this release (for example v0.4.0)
+        required: false
+        default: ""
 
 permissions:
   contents: write   # to attach builds to a release
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag || '' }}
 
 jobs:
   macos:
@@ -34,6 +39,8 @@ jobs:
       - name: End-to-end test (fake phone, fake adb)
         continue-on-error: true
         run: python3 tests/e2e/run_e2e.py -- "$PWD/macos/build/Login Relay.app/Contents/MacOS/LoginRelay" --verbose
+      - name: Check the package contains the phone app
+        run: unzip -l macos/build/Login-Relay-macOS-*.zip | grep -q "Resources/login-relay.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -58,6 +65,10 @@ jobs:
       - name: Test and build
         shell: pwsh
         run: ./windows/build.ps1
+      - name: Check the package contains the phone app
+        shell: bash
+        run: |
+          python -c "import glob,zipfile; n=zipfile.ZipFile(glob.glob('windows/publish/Login-Relay-Windows-*.zip')[0]).namelist(); print(n); assert 'login-relay.apk' in n and 'phone-app-version.txt' in n"
       - name: End-to-end test (fake phone, fake adb)
         continue-on-error: true
         shell: bash
@@ -73,9 +84,9 @@ jobs:
           name: windows
           path: windows/publish/Login-Relay-Windows-*.zip
       - name: Attach to the release
-        if: github.event_name == 'release'
+        if: env.RELEASE_TAG != ''
         shell: bash
-        run: gh release upload "${{ github.event.release.tag_name }}" windows/publish/Login-Relay-Windows-*.zip --clobber
+        run: gh release upload "$RELEASE_TAG" windows/publish/Login-Relay-Windows-*.zip --clobber
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -100,6 +111,10 @@ jobs:
           linux/packaging/build-deb.sh
           linux/packaging/build-tarball.sh
           ls -l linux/dist
+      - name: Check the packages contain the phone app
+        run: |
+          dpkg-deb -c linux/dist/*.deb | grep -q "share/loginrelay/login-relay.apk"
+          tar -tzf linux/dist/*.tar.gz | grep -q "data/login-relay.apk"
       - name: End-to-end test (fake phone, fake adb) under a virtual display
         continue-on-error: true
         working-directory: linux
@@ -116,7 +131,23 @@ jobs:
             linux/dist/*.deb
             linux/dist/*.tar.gz
       - name: Attach to the release
-        if: github.event_name == 'release'
-        run: gh release upload "${{ github.event.release.tag_name }}" linux/dist/*.deb linux/dist/*.tar.gz --clobber
+        if: env.RELEASE_TAG != ''
+        run: gh release upload "$RELEASE_TAG" linux/dist/*.deb linux/dist/*.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  checksums:
+    needs: [macos, windows, linux]
+    if: github.event_name == 'release' || inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Write SHA256SUMS for everything on the release
+        run: |
+          mkdir assets && cd assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.apk' --pattern '*.zip' --pattern '*.deb' --pattern '*.tar.gz'
+          sha256sum -- * | tee SHA256SUMS
+          gh release upload "$RELEASE_TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GH_TOKEN: ${{ github.token }}

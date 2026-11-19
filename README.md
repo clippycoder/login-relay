@@ -32,7 +32,7 @@ desktop app.
 
 | | File | Notes |
 |---|---|---|
-| Phone | `login-relay-<version>.apk` | Android 5+. No permissions. |
+| Phone | `login-relay-<version>.apk` | Android 5.1+. No permissions. |
 | macOS | `Login-Relay-macOS-<version>.zip` | Menu bar app, Apple silicon and Intel, macOS 13+ |
 | Windows | `Login-Relay-Windows-x64-<version>.zip` | Tray app, Windows 10/11 x64 |
 | Linux | `loginrelay_<version>_all.deb` or `loginrelay-<version>-linux.tar.gz` | Tray app, GTK 3 |
