@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Platform-neutral logic: no Windows-only APIs, so it builds and its tests run anywhere. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>LoginRelay.Core</AssemblyName>
+    <RootNamespace>LoginRelay.Core</RootNamespace>
+    <Version>0.3.0</Version>
+  </PropertyGroup>
+
+</Project>

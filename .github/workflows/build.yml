@@ -1,0 +1,122 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to attach builds to a release
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: macos/Tests/run.sh
+      - name: Fetch the phone app
+        run: bash .github/scripts/fetch-apk.sh "$RELEASE_TAG"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build
+        run: |
+          mkdir -p android/build
+          cp "$LOGINRELAY_APK" android/build/login-relay.apk
+          macos/build.sh
+      - name: End-to-end test (fake phone, fake adb)
+        continue-on-error: true
+        run: python3 tests/e2e/run_e2e.py -- "$PWD/macos/build/Login Relay.app/Contents/MacOS/LoginRelay" --verbose
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: macos/build/Login-Relay-macOS-*.zip
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch the phone app
+        shell: bash
+        run: bash .github/scripts/fetch-apk.sh "$RELEASE_TAG"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Test and build
+        shell: pwsh
+        run: ./windows/build.ps1
+      - name: End-to-end test (fake phone, fake adb)
+        continue-on-error: true
+        shell: bash
+        run: python tests/e2e/run_e2e.py -- windows/publish/LoginRelay.exe
+        env:
+          LOGINRELAY_LOG: ${{ runner.temp }}/loginrelay.log
+      - name: App log
+        if: always()
+        shell: bash
+        run: cat "$RUNNER_TEMP/loginrelay.log" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: windows/publish/Login-Relay-Windows-*.zip
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        shell: bash
+        run: gh release upload "${{ github.event.release.tag_name }}" windows/publish/Login-Relay-Windows-*.zip --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
+            xvfb dbus-x11 xdg-utils dpkg-dev
+      - name: Unit tests
+        run: python3 -m unittest discover -s linux/tests -v
+      - name: Fetch the phone app
+        run: bash .github/scripts/fetch-apk.sh "$RELEASE_TAG"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build the packages
+        run: |
+          linux/packaging/build-deb.sh
+          linux/packaging/build-tarball.sh
+          ls -l linux/dist
+      - name: End-to-end test (fake phone, fake adb) under a virtual display
+        continue-on-error: true
+        working-directory: linux
+        run: xvfb-run -a dbus-run-session -- python3 ../tests/e2e/run_e2e.py -- python3 -m loginrelay
+        env:
+          LOGINRELAY_LOG: ${{ runner.temp }}/loginrelay.log
+      - name: App log
+        if: always()
+        run: cat "$RUNNER_TEMP/loginrelay.log" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            linux/dist/*.deb
+            linux/dist/*.tar.gz
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" linux/dist/*.deb linux/dist/*.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

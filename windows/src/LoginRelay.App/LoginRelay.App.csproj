@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>LoginRelay</AssemblyName>
+    <RootNamespace>LoginRelay.App</RootNamespace>
+    <Version>0.3.0</Version>
+    <AssemblyTitle>Login Relay</AssemblyTitle>
+    <Product>Login Relay</Product>
+    <Description>Finishes browser sign-ins for Android phones that have no browser.</Description>
+    <ApplicationIcon>..\..\Resources\app.ico</ApplicationIcon>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <!-- One self-contained exe: nothing to install, no .NET runtime needed. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LoginRelay.Core\LoginRelay.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\Resources\app.ico" LogicalName="app.ico" />
+    <EmbeddedResource Include="..\..\Resources\tray.ico" LogicalName="tray.ico" />
+    <EmbeddedResource Include="..\..\Resources\tray-off.ico" LogicalName="tray-off.ico" />
+    <EmbeddedResource Include="..\..\Resources\tray-active.ico" LogicalName="tray-active.ico" />
+  </ItemGroup>
+
+</Project>
