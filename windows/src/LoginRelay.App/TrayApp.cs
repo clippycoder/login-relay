@@ -31,10 +31,7 @@ namespace LoginRelay.App
             }
             catch (InvalidOperationException)
             {
-                // The UI is shutting down.
-            }
-            catch (ObjectDisposedException)
-            {
+                // The UI is shutting down (this includes ObjectDisposedException).
             }
         }
     }
