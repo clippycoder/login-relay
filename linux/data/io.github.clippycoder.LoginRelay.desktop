@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Login Relay
+GenericName=Browser sign-in relay for Android phones
+Comment=Finishes browser sign-ins for Android phones that have no browser
+Exec=loginrelay
+Icon=io.github.clippycoder.LoginRelay
+Terminal=false
+Categories=Utility;
+Keywords=android;adb;sign-in;login;oauth;
+StartupNotify=false

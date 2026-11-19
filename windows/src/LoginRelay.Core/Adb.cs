@@ -193,8 +193,12 @@ namespace LoginRelay.Core
         ///
         /// When adb has to start its server it forks a daemon that inherits our output handles, so "read
         /// until EOF" blocks until that daemon exits, i.e. forever. So: wait for the process (with a
-        /// timeout, killing its whole tree if it overstays), then give the output events at most about
-        /// half a second to finish. Every process is disposed.
+        /// timeout, killing its whole tree if it overstays), then give the readers at most about half a
+        /// second to finish. Every process is disposed.
+        ///
+        /// The output is read by two dedicated threads rather than with Process.BeginOutputReadLine: the
+        /// async events run on the thread pool, and when the pool is busy (a loaded machine, many tests
+        /// at once) they can fire late enough for the bounded drain to expire and return empty output.
         /// </summary>
         public static ProcessResult Exec(string path, IEnumerable<string> args, double timeoutSeconds = 20)
         {
@@ -215,49 +219,49 @@ namespace LoginRelay.Core
 
             var outText = new StringBuilder();
             var errText = new StringBuilder();
-            // These events are deliberately never disposed: the data handlers can still fire after we have
-            // given up waiting, and touching a disposed event there would crash the process.
-            var outEof = new ManualResetEventSlim(false);
-            var errEof = new ManualResetEventSlim(false);
             var gate = new object();
             bool accepting = true;
+
+            // Copies a stream into a StringBuilder until it ends. Daemon-style: if we give up on it, it
+            // simply stops appending (accepting == false) and dies with the process or the disposed stream.
+            Thread Pump(StreamReader reader, StringBuilder sink, string name)
+            {
+                var t = new Thread(() =>
+                {
+                    var buffer = new char[4096];
+                    try
+                    {
+                        int n;
+                        while ((n = reader.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            lock (gate)
+                            {
+                                if (!accepting)
+                                {
+                                    return;
+                                }
+                                sink.Append(buffer, 0, n);
+                            }
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // The stream was closed under us (disposed after we stopped waiting).
+                    }
+                })
+                {
+                    IsBackground = true,
+                    Name = name,
+                };
+                t.Start();
+                return t;
+            }
 
             Process? proc = null;
             try
             {
                 proc = new Process();
                 proc.StartInfo = psi;
-                proc.OutputDataReceived += (sender, ev) =>
-                {
-                    if (ev.Data == null)
-                    {
-                        outEof.Set();
-                        return;
-                    }
-                    lock (gate)
-                    {
-                        if (accepting)
-                        {
-                            outText.AppendLine(ev.Data);
-                        }
-                    }
-                };
-                proc.ErrorDataReceived += (sender, ev) =>
-                {
-                    if (ev.Data == null)
-                    {
-                        errEof.Set();
-                        return;
-                    }
-                    lock (gate)
-                    {
-                        if (accepting)
-                        {
-                            errText.AppendLine(ev.Data);
-                        }
-                    }
-                };
-
                 proc.Start();
                 try
                 {
@@ -266,8 +270,8 @@ namespace LoginRelay.Core
                 catch (IOException)
                 {
                 }
-                proc.BeginOutputReadLine();
-                proc.BeginErrorReadLine();
+                Thread outThread = Pump(proc.StandardOutput, outText, "adb-stdout");
+                Thread errThread = Pump(proc.StandardError, errText, "adb-stderr");
 
                 int waitMs = (int)Math.Min(int.MaxValue - 1, Math.Max(1, timeoutSeconds * 1000));
                 bool exited = proc.WaitForExit(waitMs);
@@ -284,11 +288,10 @@ namespace LoginRelay.Core
                     proc.WaitForExit(2000);
                 }
 
-                // The process is gone (or killed). Give the output at most ~500 ms to drain.
+                // The process is gone (or killed). Give the readers at most ~500 ms to reach the end.
                 var clock = Stopwatch.StartNew();
-                outEof.Wait(500);
-                int left = (int)Math.Max(0, 500 - clock.ElapsedMilliseconds);
-                errEof.Wait(left);
+                outThread.Join(500);
+                errThread.Join((int)Math.Max(0, 500 - clock.ElapsedMilliseconds));
 
                 string o;
                 string e;
@@ -314,20 +317,6 @@ namespace LoginRelay.Core
             {
                 if (proc != null)
                 {
-                    try
-                    {
-                        proc.CancelOutputRead();
-                    }
-                    catch (Exception)
-                    {
-                    }
-                    try
-                    {
-                        proc.CancelErrorRead();
-                    }
-                    catch (Exception)
-                    {
-                    }
                     try
                     {
                         proc.Dispose();
