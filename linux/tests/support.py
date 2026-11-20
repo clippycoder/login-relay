@@ -184,6 +184,12 @@ class FakePhoneServer:
         """Hang up and stop listening, for good."""
         self._stopped = True
         try:
+            # On Linux close() alone doesn't wake a thread blocked in accept(), and the kernel keeps the
+            # port listening until it returns; shutdown() does wake it, so "stopped" really means refused.
+            self._srv.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
             self._srv.close()
         except OSError:
             pass

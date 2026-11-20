@@ -18,6 +18,10 @@ import subprocess
 from typing import List, Optional
 
 
+# Where an Android SDK commonly lives on a Linux system (besides the user's home); tests clear this.
+SYSTEM_SDK_ROOTS = ("/opt/android-sdk", "/usr/lib/android-sdk", "/usr/local/lib/android/sdk")
+
+
 def find_adb(env=None) -> Optional[str]:
     env = os.environ if env is None else env
     found = shutil.which("adb", path=env.get("PATH") or None)
@@ -25,8 +29,8 @@ def find_adb(env=None) -> Optional[str]:
         return found
     home = env.get("HOME") or os.path.expanduser("~")
     roots: List[str] = [env[k] for k in ("ANDROID_HOME", "ANDROID_SDK_ROOT") if env.get(k)]
-    roots += [os.path.join(home, "Android", "Sdk"), os.path.join(home, "Android", "sdk"),
-              "/opt/android-sdk", "/usr/lib/android-sdk", "/usr/local/lib/android/sdk"]
+    roots += [os.path.join(home, "Android", "Sdk"), os.path.join(home, "Android", "sdk")]
+    roots += list(SYSTEM_SDK_ROOTS)
     for root in roots:
         candidate = os.path.join(root, "platform-tools", "adb")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):

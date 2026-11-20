@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from support import stable_fds, assert_fds_flat, wait_until  # noqa: E402
@@ -41,8 +42,10 @@ class AdbServerHelperTests(unittest.TestCase):
 
     def test_no_adb_is_silent(self):
         empty = tempfile.mkdtemp(prefix="lr-empty-")
-        self.assertIsNone(adbserver.find_adb({"HOME": empty, "PATH": empty}))
-        self.assertFalse(adbserver.stop_adb_server(env={"HOME": empty, "PATH": empty}))
+        # Some machines (CI runners) really have an SDK in a system folder, so take those out of the search.
+        with mock.patch.object(adbserver, "SYSTEM_SDK_ROOTS", ()):
+            self.assertIsNone(adbserver.find_adb({"HOME": empty, "PATH": empty}))
+            self.assertFalse(adbserver.stop_adb_server(env={"HOME": empty, "PATH": empty}))
 
     def test_does_not_wait_for_a_daemon_that_inherited_the_output(self):
         # `adb kill-server` / start-server can leave a daemon holding stdout. With pipes we would wait for
