@@ -89,7 +89,7 @@ namespace LoginRelay.Core.Tests
             }
         }
 
-        public void PhoneHello(string version = "0.5.0")
+        public void PhoneHello(string version = "0.6.0")
         {
             PhoneSend("{\"v\":1,\"type\":\"hello\",\"transport\":\"usb\",\"version\":\"" + version + "\"}");
         }

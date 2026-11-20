@@ -3,11 +3,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.clippycoder.oauthrelay">
 
-    <!-- USB accessory mode lets a computer talk to the app over the cable without USB debugging. It needs no
-         permission; Android asks the user once. Optional: phones without it still work over adb. -->
+    <!-- USB accessory mode is how a computer talks to the app, over the cable. It needs no permission;
+         Android asks the user once. The app can't work on a phone without it. -->
     <uses-feature
         android:name="android.hardware.usb.accessory"
-        android:required="false" />
+        android:required="true" />
 
     <application
         android:label="@string/app_name"
@@ -17,8 +17,8 @@
 
         <!--
           Answers "open this web page" for apps on a phone that has no browser, and hands the
-          page to a computer connected over adb. It never renders web content itself.
-          singleTask: one instance, so one socket server; excludeFromRecents: it is transient.
+          page to a computer connected over USB. It never renders web content itself.
+          singleTask: one instance, so one screen owns the USB link; excludeFromRecents: it is transient.
         -->
         <activity
             android:name=".RelayActivity"

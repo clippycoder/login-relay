@@ -46,14 +46,6 @@ namespace LoginRelay.Core.Tests
             }
         }
 
-        [Fact]
-        public void FindingAdbNeverThrows()
-        {
-            // The result depends on the machine; the point is that looking is safe and silent.
-            string? path = AdbServer.Find();
-            Assert.True(path == null || path.Length > 0);
-        }
-
         // ---- LOGINRELAY_FAKE_PHONE ---------------------------------------------------------------------
 
         [Theory]

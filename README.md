@@ -40,15 +40,15 @@ desktop app.
 
 Each release lists SHA-256 checksums in `SHA256SUMS`.
 
-**Versions 0.5.0 and later talk to the phone only over USB, in Android's USB accessory mode, and need no
-USB debugging.** If you'd rather use adb (USB debugging or wireless debugging), the
-[v0.4.0 release](https://github.com/clippycoder/login-relay/releases/tag/v0.4.0) and its phone app still
-do that.
+**This version talks to the phone only over USB, in Android's USB accessory mode, and needs no USB
+debugging. There is no adb support.** If you want adb (USB debugging or wireless debugging), use the
+[v0.4.0 release](https://github.com/clippycoder/login-relay/releases/tag/v0.4.0) with the phone app that comes
+with it; the phone app in this version no longer has an adb link, so the two don't mix.
 
 ## Use it
 
 1. **Install Login Relay on the phone.** It's an ordinary APK with no permissions: install it however you
-   install apps (your MDM, a file manager, `adb install`). It's also bundled in each desktop download.
+   install apps (your MDM, a file manager). It's also bundled in each desktop download.
 2. **Start the desktop app.** It lives in the menu bar / system tray and shows the phone's state.
 3. **Plug the phone in with USB.** If the desktop app says it can't find a phone, pull down the phone's USB
    notification and choose **File transfer**. USB debugging is **not** needed. The first time, Android asks
@@ -59,8 +59,9 @@ do that.
 
 This is Android's USB accessory mode (the protocol Android Auto uses): the desktop app asks the phone to
 re-enumerate as an accessory, then talks to the Login Relay app over it. The phone checks the sign-in
-result itself (same return address, same `state`) before handing it to the app. If an adb server is
-running and holding the phone, the desktop app stops it (it restarts when needed).
+result itself (same return address, same `state`) before handing it to the app. If another program has the
+phone open (an Android debugging tool, for example), the desktop app says so; close that program and choose
+**Check Again**.
 
 The menu has **Launch at Login**, **Notify When a Sign-in Arrives**, and **Show Activity…**, a window
 with a log. On macOS there is also **Show in Dock** (off by default, so it lives only in the menu bar).
@@ -78,14 +79,22 @@ Unzip and run `LoginRelay.exe` (keep `login-relay.apk` next to it). It isn't cod
 may say "Windows protected your PC": choose *More info* → *Run anyway*. **Launch at Login** adds a
 per-user startup entry.
 
-**Windows drivers.** This needs proper USB drivers, and the app doesn't install them. It talks to the phone
-through libusb, which can only open devices that use the **WinUSB** driver, and Windows' stock phone driver
-(MTP) isn't one. Install WinUSB for the phone with [Zadig](https://zadig.akeo.ie/) (Options → List All
-Devices, pick the phone, choose WinUSB, Replace Driver). After the app first switches the phone into accessory
-mode, a second device, "Android Accessory Interface" (USB ID `18D1:2D00`–`2D05`), appears and needs WinUSB
-too. If the app says "Can't open the phone", a missing driver is the likely reason. Installing WinUSB for the
-phone takes over its normal Windows connection (file transfer) until you restore the driver in Device
-Manager. Not yet tried with a real phone on Windows, so treat these steps as unverified.
+#### Windows drivers
+
+This needs proper USB drivers, and the app doesn't install them. It talks to the phone through
+[libusb](https://libusb.info/), which can only open devices that use the **WinUSB** driver, and Windows' stock
+phone driver (MTP) isn't one. When the app can't open the phone it says "Can't open the phone" and points
+here: that usually means a WinUSB driver is missing.
+
+1. Install WinUSB for the phone with [Zadig](https://zadig.akeo.ie/): *Options → List All Devices*, pick the
+   phone, choose **WinUSB**, *Replace Driver*.
+2. After the app first switches the phone into accessory mode, a second device, "Android Accessory Interface"
+   (USB ID `18D1:2D00`–`2D05`), appears and needs WinUSB too. Repeat the step for it.
+
+Replacing the phone's driver takes over its normal Windows connection (file transfer) until you restore the
+driver in Device Manager. The [libusb Windows guide](https://github.com/libusb/libusb/wiki/Windows#driver-installation)
+explains driver installation in more detail. This hasn't been tried with a real phone on Windows yet, so treat
+the steps as unverified.
 
 ### Linux
 
@@ -98,19 +107,6 @@ or unpack the tarball and run `./install.sh` for a per-user install under `~/.lo
 AppIndicator, so it needs a desktop that shows those: KDE does; **GNOME needs the "AppIndicator and
 KStatusNotifierItem Support" extension**. Without a tray the app keeps its window open instead, with
 the same actions.
-
-### No desktop app? The command-line helper (adb)
-
-An older Python script does the same job with no tray or window, but over adb (USB debugging on). With
-Login Relay installed on the phone and the phone connected over adb:
-
-```
-curl -fsSL https://raw.githubusercontent.com/clippycoder/login-relay/main/relay.sh | sh
-```
-
-`relay.sh` downloads `host/oauth_relay.py` and runs it, so `python3` must be installed. To pass options,
-use `… | sh -s -- --serial 1234ABCD`. Options: `--serial` picks a phone, `--paste` skips the URL handler
-and you paste the final address by hand, `--yes` skips the warning for sign-ins without PKCE.
 
 Links that aren't sign-ins, such as a "terms of service" link, also open on the computer.
 
@@ -164,9 +160,8 @@ system refuses the claim.
 ## Managed phones (MDM)
 
 Login Relay is an ordinary app with no permissions, so it can be distributed through an MDM like
-any other in-house APK. An MDM that removes sideloaded apps will also remove a copy installed with
-`adb install`, so add it through the console instead. Over USB the desktop apps need no developer
-options on the phone.
+any other in-house APK. An MDM that removes sideloaded apps will also remove a copy you install by hand, so
+add it through the console instead. The desktop apps need no developer options on the phone.
 
 | | |
 |---|---|
@@ -228,8 +223,16 @@ Over the USB cable (Android Open Accessory), messages are newline-delimited JSON
 
 [docs/PORTING.md](docs/PORTING.md#usb-accessory-mode) has the details (switching, framing, liveness).
 
-The phone app (0.4.0) also still serves the older adb transport (an abstract unix socket `@oauthrelay`
-reached with `adb forward`) so the v0.4.0 desktop apps and `relay.sh` keep working.
+## Sources
+
+- [Android Open Accessory protocol](https://source.android.com/docs/core/interaction/accessories/protocol): the
+  switch and the accessory device the desktop apps speak.
+- [Android's USB accessory guide](https://developer.android.com/develop/connectivity/usb/accessory): how the
+  phone app receives the accessory.
+- [libusb](https://libusb.info/) (Windows) and [PyUSB](https://github.com/pyusb/pyusb) (Linux), and Apple's
+  IOKit USB interfaces (macOS): the USB access layers the desktop apps use.
+- [Zadig](https://zadig.akeo.ie/) and the [libusb Windows guide](https://github.com/libusb/libusb/wiki/Windows#driver-installation):
+  installing the WinUSB driver Windows needs.
 
 ## License
 

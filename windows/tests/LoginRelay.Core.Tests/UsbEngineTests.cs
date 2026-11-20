@@ -152,9 +152,9 @@ namespace LoginRelay.Core.Tests
 
                 // The phone app starts answering and says hello.
                 conn.RespondToPings = true;
-                conn.PhoneHello("0.5.0");
+                conn.PhoneHello("0.6.0");
                 Assert.True(TestUtil.WaitFor(() => rig.Kind() == PhaseKind.Ready));
-                Assert.True(TestUtil.WaitFor(() => rig.Logged("Login Relay 0.5.0 on the phone says hello (usb).")));
+                Assert.True(TestUtil.WaitFor(() => rig.Logged("Login Relay 0.6.0 on the phone says hello (usb).")));
                 Assert.True(rig.Logged("Login Relay on the phone is answering."));
                 (string status2, string detail2) = rig.Ui.Invoke(() => rig.Engine.Describe());
                 Assert.Equal("Fake Phone is ready", status2);
@@ -244,7 +244,8 @@ namespace LoginRelay.Core.Tests
                 rig.Backend.AccessoryAppears = false;
                 rig.Backend.Add(FakeUsbBackend.Phone("1-1"));
                 Assert.True(TestUtil.WaitFor(() => rig.Backend.Switches.Length == 1));
-                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbDetail) == "The phone didn't switch to accessory mode.", 1200));
+                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbDetail) == UsbText.CantOpenDetail, 1200));
+                Assert.Equal(PhaseKind.CantOpen, rig.Kind());
                 Thread.Sleep(500);
                 Assert.Single(rig.Backend.Switches); // still inside the limit
                 Assert.True(TestUtil.WaitFor(() => rig.Backend.Switches.Length == 2, 6000), "tried again after the interval");
@@ -264,35 +265,37 @@ namespace LoginRelay.Core.Tests
             }
         }
 
+        private const string BusyText = "Another program has the phone open. Close it, then choose Check Again.";
+
         [Fact]
-        public void ABusyPhoneStopsTheAdbServerOnceAndTriesAgain()
+        public void ABusyPhoneJustReportsItAndSaysWhatToDo()
         {
-            int stops = 0;
-            using (var rig = new UsbRig(tweak: e => e.StopAdbServer = () =>
-            {
-                Interlocked.Increment(ref stops);
-                return true;
-            }))
+            using (var rig = new UsbRig())
             {
                 rig.Backend.SwitchCode = UsbCode.Busy;
                 rig.Backend.Add(FakeUsbBackend.Phone("1-1"));
-                Assert.True(TestUtil.WaitFor(() => rig.Backend.Switches.Length == 2), "the switch was retried after stopping adb");
-                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbDetail) == "Another program has Fake Phone open (usually adb)."));
-                Assert.Equal(1, Volatile.Read(ref stops));
-                Assert.True(TestUtil.WaitFor(() => rig.LoggedContaining("Stopped it")));
+                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbDetail) == BusyText));
+                Thread.Sleep(300);
+                Assert.Single(rig.Backend.Switches); // no second attempt behind the user's back
+                Assert.Equal(PhaseKind.Connecting, rig.Kind());
+                Assert.False(rig.Ui.Invoke(() => rig.Engine.UsbCantOpen));
+                (string status, string detail) = rig.Ui.Invoke(() => rig.Engine.Describe());
+                Assert.Equal("Connecting to Fake Phone…", status);
+                Assert.Equal(BusyText, detail);
+                Assert.False(rig.LoggedContaining("Stopped"));
             }
         }
 
         [Fact]
-        public void ABusyPhoneWithNoAdbToStopIsSilentAboutIt()
+        public void ABusyAccessoryIsReportedTheSameWay()
         {
-            using (var rig = new UsbRig(tweak: e => e.StopAdbServer = () => false))
+            using (var rig = new UsbRig())
             {
-                rig.Backend.SwitchCode = UsbCode.Busy;
-                rig.Backend.Add(FakeUsbBackend.Phone("1-1"));
-                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbDetail) == "Another program has Fake Phone open (usually adb)."));
-                Assert.Single(rig.Backend.Switches);
-                Assert.False(rig.LoggedContaining("adb server"));
+                rig.Backend.OpenFailCode = UsbCode.Busy;
+                rig.Backend.Add(new UsbDevice(Aoa.VendorGoogle, Aoa.PidFirst, "1-1", true, true, "Fake Phone", "S"));
+                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbDetail) == BusyText));
+                Assert.Equal(PhaseKind.Connecting, rig.Kind());
+                Assert.False(rig.Ui.Invoke(() => rig.Engine.UsbCantOpen));
             }
         }
 
@@ -502,13 +505,22 @@ namespace LoginRelay.Core.Tests
 
         // ---- a phone libusb can't open ---------------------------------------------------------------
 
+        private const string CantOpenText = "Windows probably needs a WinUSB driver for the phone. The free tool Zadig can install one (zadig.akeo.ie); see “Windows drivers” in the README: github.com/clippycoder/login-relay#windows-drivers";
+
+        /// <summary>A hint, not a guide: no numbered steps, no wizard.</summary>
+        private static void AssertNoGuideText(string text)
+        {
+            Assert.DoesNotContain("Step", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("wizard", text, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void AssertPlainCantOpen(UsbRig rig)
         {
             (string status, string detail) = rig.Ui.Invoke(() => rig.Engine.Describe());
             Assert.Equal("Can't open the phone", status);
-            Assert.Equal("Login Relay needs a WinUSB driver for the phone. See “Windows drivers” in the README (github.com/clippycoder/login-relay).", detail);
-            Assert.DoesNotContain("Zadig", status + detail);
-            Assert.DoesNotContain("Step", status + detail);
+            Assert.Equal(CantOpenText, detail);
+            Assert.Contains("Zadig", detail);
+            AssertNoGuideText(status + detail);
             Assert.Equal(PhaseKind.CantOpen, rig.Kind());
             Assert.True(rig.Ui.Invoke(() => rig.Engine.UsbCantOpen));
         }
@@ -524,6 +536,56 @@ namespace LoginRelay.Core.Tests
                 Assert.Empty(rig.Backend.Switches);
                 Assert.Equal(0, rig.Backend.OpenCount);
             }
+        }
+
+        [Fact]
+        public void ASwitchThatWasAcceptedButNeverProducedAnAccessoryGetsTheDriverHint()
+        {
+            using (var rig = new UsbRig(tweak: e => e.UsbAppearTimeout = TimeSpan.FromMilliseconds(300)))
+            {
+                rig.Backend.AccessoryAppears = false;
+                rig.Backend.Add(FakeUsbBackend.Phone("1-1"));
+                Assert.True(TestUtil.WaitFor(() => rig.Backend.Switches.Length == 1));
+                Assert.True(TestUtil.WaitFor(() => rig.Kind() == PhaseKind.CantOpen));
+                AssertPlainCantOpen(rig);
+                Assert.Equal(0, rig.Backend.OpenCount);
+            }
+        }
+
+        [Fact]
+        public void TheDriverHelpActionOpensTheReadmeSectionAndNothingElse()
+        {
+            using (var rig = new UsbRig())
+            {
+                rig.Backend.Add(new UsbDevice(0x04E8, 0x6860, "1-1", false, true, "Android phone (04e8:6860)", "", false));
+                Assert.True(TestUtil.WaitFor(() => rig.Kind() == PhaseKind.CantOpen));
+                rig.Ui.Invoke(() => rig.Engine.OpenDriverHelp());
+                Assert.Equal(new[] { "https://github.com/clippycoder/login-relay#windows-drivers" }, rig.Platform.Opened);
+            }
+        }
+
+        [Fact]
+        public void NoUsbWordingIsAStepByStepGuide()
+        {
+            var texts = new System.Collections.Generic.List<string>
+            {
+                UsbText.CantOpenHeadline,
+                UsbText.CantOpenDetail,
+                UsbText.BusyDetail,
+                UsbText.NoPhoneHeadline,
+                UsbText.NoPhoneDetail,
+                UsbText.NeedsLibusb,
+            };
+            for (int code = 0; code >= -11; code--)
+            {
+                texts.Add(UsbText.ErrorText(new UsbSwitchResult(code, 0, ""), "Fake Phone"));
+            }
+            foreach (string text in texts)
+            {
+                AssertNoGuideText(text);
+            }
+            Assert.Equal(CantOpenText, UsbText.CantOpenDetail);
+            Assert.Equal(BusyText, UsbText.BusyDetail);
         }
 
         [Fact]
@@ -667,8 +729,8 @@ namespace LoginRelay.Core.Tests
             try
             {
                 Directory.CreateDirectory(dir);
-                // A prefs file from before 0.5.0 has adb settings in it; they are ignored.
-                File.WriteAllText(path, "{\"AdbPath\":\"C:\\\\adb.exe\",\"SelectedSerial\":\"ABC\",\"Transport\":\"adb\",\"Notifications\":true}");
+                // A prefs file from an older version has settings that no longer exist; they are ignored.
+                File.WriteAllText(path, "{\"OldToolPath\":\"C:\\\\old.exe\",\"SelectedSerial\":\"ABC\",\"Transport\":\"old\",\"Notifications\":true}");
                 var prefs = new Prefs(path);
                 Assert.True(prefs.Notifications);
                 Assert.Null(prefs.UsbSelected);

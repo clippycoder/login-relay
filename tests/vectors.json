@@ -226,59 +226,5 @@
     "x": "1"
    }
   }
- ],
- "shellQuote": [
-  [
-   "a b",
-   "'a b'"
-  ],
-  [
-   "it's",
-   "'it'\"'\"'s'"
-  ],
-  [
-   "x;rm -rf /",
-   "'x;rm -rf /'"
-  ],
-  [
-   "",
-   "''"
-  ],
-  [
-   "com.example.relaytest://cb?code=a'b&state=x y",
-   "'com.example.relaytest://cb?code=a'\"'\"'b&state=x y'"
-  ]
- ],
- "versionLess": [
-  [
-   "0.2.2",
-   "0.3.0",
-   true
-  ],
-  [
-   "0.3.0",
-   "0.3.0",
-   false
-  ],
-  [
-   "0.10.0",
-   "0.9.9",
-   false
-  ],
-  [
-   "0.3",
-   "0.3.1",
-   true
-  ],
-  [
-   "1.0.0",
-   "0.99.99",
-   false
-  ],
-  [
-   "0.3.0",
-   "0.2.2",
-   false
-  ]
  ]
 }

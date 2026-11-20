@@ -291,7 +291,7 @@ namespace LoginRelay.Core.Tests
                 try
                 {
                     NetworkStream stream = client.GetStream();
-                    Write(stream, "{\"v\":1,\"type\":\"hello\",\"transport\":\"usb\",\"version\":\"0.5.0\"}");
+                    Write(stream, "{\"v\":1,\"type\":\"hello\",\"transport\":\"usb\",\"version\":\"0.6.0\"}");
                     if (_openJson != null && !_done)
                     {
                         Write(stream, _openJson);

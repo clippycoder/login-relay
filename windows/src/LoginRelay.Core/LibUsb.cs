@@ -671,7 +671,7 @@ namespace LoginRelay.Core
                 {
                     throw new UsbException(UsbCode.NotFound, "the device at " + location + " isn't in accessory mode");
                 }
-                // The accessory is interface 0 (with 18D1:2D01 there is a second one for adb: leave it alone).
+                // The accessory is interface 0 (with 18D1:2D01 there is a second, unrelated interface: leave it alone).
                 byte endpointIn = 0;
                 byte endpointOut = 0;
                 bool haveIn = false;

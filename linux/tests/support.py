@@ -68,7 +68,7 @@ class FakePhoneServer:
     set and hasn't been finished) sends an `open` for it, answers pings with pongs, and answers a
     `callback` with `delivered` (or an `error`). Everything it receives is kept in `received`."""
 
-    def __init__(self, url=None, referrer="android-app://" + PACKAGE, label="Example App", version="0.5.0",
+    def __init__(self, url=None, referrer="android-app://" + PACKAGE, label="Example App", version="0.6.0",
                  hello=True, idle=False, answer_ping=True, delivery_reply="delivered", cancel_after=None):
         self.pending = url
         self.referrer, self.label, self.version = referrer, label, version

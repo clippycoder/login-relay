@@ -21,7 +21,7 @@ typedef struct {
     uint16_t product_id;
     uint32_t location_id;   // identifies the port; stays the same across the mode switch
     int is_accessory;       // already in accessory mode (18D1:2D00..2D05)
-    int looks_android;      // exposes an MTP/PTP/ADB-style interface, so worth asking about AOA
+    int looks_android;      // exposes an MTP/PTP or debugging interface, so worth asking about AOA
     char name[AOA_STRING_MAX];
     char serial[AOA_STRING_MAX];
 } aoa_info;

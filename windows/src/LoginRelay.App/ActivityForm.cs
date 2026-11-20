@@ -163,6 +163,10 @@ namespace LoginRelay.App
                 case PhaseKind.Working:
                     Offer(_primary, "Cancel", () => _engine.CancelActive("Cancelled on the computer.", true), true);
                     break;
+                case PhaseKind.CantOpen:
+                    Offer(_primary, "Check Again", _engine.CheckAgain, true);
+                    Offer(_secondary, "Driver Help…", _engine.OpenDriverHelp, false);
+                    break;
                 default:
                     Offer(_primary, "Check Again", _engine.CheckAgain, true);
                     break;

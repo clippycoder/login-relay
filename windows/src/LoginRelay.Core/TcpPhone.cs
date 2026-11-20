@@ -70,7 +70,7 @@ namespace LoginRelay.Core
     }
 
     /// <summary>
-    /// An <see cref="IUsbConnection"/> over a TCP socket. Windows lessons from the old adb link apply: closing
+    /// An <see cref="IUsbConnection"/> over a TCP socket. Windows lesson: closing
     /// (disposing) the socket is what wakes a blocked call, and the engine's link runs the reads on its own thread.
     /// </summary>
     public sealed class TcpPhoneConnection : IUsbConnection

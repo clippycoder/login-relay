@@ -14,7 +14,7 @@ struct UsbDevice: Equatable {
     let location: UInt32
     /// Already in accessory mode (Google 18D1:2D00...2D05).
     let isAccessory: Bool
-    /// Exposes an MTP/PTP/ADB-style interface, so it's worth asking about accessory mode.
+    /// Exposes an MTP/PTP or debugging interface, so it's worth asking about accessory mode.
     let looksAndroid: Bool
     let name: String
     let serial: String
@@ -25,30 +25,6 @@ struct UsbDevice: Equatable {
 enum Usb {
     /// kIOReturnExclusiveAccess: another program has the device open.
     static let exclusiveAccess: UInt32 = 0xe00002c5
-
-    /// Best effort, silent if there's nothing to do. An Android Debug Bridge server that happens to be running
-    /// on this Mac holds a phone exclusively, which blocks the accessory switch (kIOReturnExclusiveAccess).
-    /// Stopping it is harmless: it starts again the next time something needs it. Looks for the tool in PATH
-    /// and the usual install places; returns whether it ran one. Output is never read: the server forks a
-    /// daemon that inherits any pipe, so waiting for end-of-file could wait forever.
-    static func stopAdbServer() -> Bool {
-        var dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        dirs += ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/Library/Android/sdk/platform-tools"]
-        let fm = FileManager.default
-        guard let path = dirs.map({ $0 + "/adb" }).first(where: { fm.isExecutableFile(atPath: $0) }) else { return false }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["kill-server"]
-        p.standardInput = FileHandle.nullDevice
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return false }
-        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
-        p.waitUntilExit()
-        killer.cancel()
-        return true
-    }
 
     static func list() -> [UsbDevice] {
         var infos = [aoa_info](repeating: aoa_info(), count: 64)
@@ -97,7 +73,7 @@ enum Usb {
         switch r.code {
         case Int32(AOA_ERR_UNSUPPORTED): return "\(name) doesn't answer the USB accessory protocol."
         case Int32(AOA_ERR_OPEN) where r.iokit == exclusiveAccess:
-            return "Another program has \(name) open. Quit it (or unplug and replug the phone), then choose Check Again."
+            return "Another program has the phone open. Close it, then choose Check Again."
         case Int32(AOA_ERR_OPEN): return "Couldn't open \(name) over USB."
         case Int32(AOA_ERR_NOT_FOUND): return "\(name) disappeared."
         default: return "Couldn't switch \(name) to accessory mode (error \(r.code))."

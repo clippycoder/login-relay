@@ -35,9 +35,6 @@ namespace LoginRelay.Core
         /// <summary>How to reach libusb (or, with LOGINRELAY_FAKE_PHONE, a TCP socket). Replaced by tests.</summary>
         public Func<IUsbBackend> UsbBackendFactory { get; set; } = DefaultBackend;
 
-        /// <summary>Stops the adb server, which holds a phone exclusively. Replaced by tests.</summary>
-        public Func<bool> StopAdbServer { get; set; } = AdbServer.Stop;
-
         // ---- state (UI thread) --------------------------------------------------------------------
 
         public IReadOnlyList<UsbDevice> UsbCandidates { get; private set; } = new List<UsbDevice>();
@@ -96,6 +93,18 @@ namespace LoginRelay.Core
         {
             _prefs.UsbSelected = id;
             RefreshNow();
+        }
+
+        /// <summary>
+        /// "Driver Help…": opens the README's Windows drivers section in the browser. Only offered while the status
+        /// is <see cref="PhaseKind.CantOpen"/>.
+        /// </summary>
+        public void OpenDriverHelp()
+        {
+            if (!_platform.OpenUrl(UsbText.DriverHelpUrl))
+            {
+                Log("Couldn't open the browser. Open " + UsbText.DriverHelpUrl + " yourself.");
+            }
         }
 
         // ---- UI-thread publishing -----------------------------------------------------------------
@@ -288,6 +297,10 @@ namespace LoginRelay.Core
             try
             {
                 backend = UsbBackendFactory();
+                // True while the last switch attempt ended in "probably a missing driver". The next attempt's
+                // "Asking … to switch" status keeps the hint on screen instead of flickering it off for the
+                // whole time the app waits for the accessory to appear.
+                bool driverHint = false;
                 while (UsbCurrent(gen))
                 {
                     try
@@ -344,23 +357,12 @@ namespace LoginRelay.Core
                                 _wake.WaitOne(RetryDelay);
                                 continue;
                             }
-                            PublishUsb(gen, phone, candidates, "Asking " + target.Name + " to switch to USB accessory mode…");
+                            PublishUsb(gen, phone, candidates, "Asking " + target.Name + " to switch to USB accessory mode…", driverHint);
                             UsbSwitchResult r = backend.SwitchToAccessory(target.Location, HostName);
-                            if (r.Code == UsbCode.Busy && StopAdbServerOnce())
-                            {
-                                _wake.WaitOne(RetryDelay);
-                                r = backend.SwitchToAccessory(target.Location, HostName);
-                            }
                             if (r.Code != UsbCode.Ok)
                             {
-                                if (UsbText.IsCantOpen(r.Code))
-                                {
-                                    PublishUsb(gen, phone, candidates, UsbText.ErrorText(r, target.Name), true);
-                                }
-                                else
-                                {
-                                    PublishUsb(gen, phone, candidates, UsbText.ErrorText(r, target.Name));
-                                }
+                                driverHint = UsbText.IsCantOpen(r.Code);
+                                PublishUsb(gen, phone, candidates, UsbText.ErrorText(r, target.Name), driverHint);
                                 _wake.WaitOne(TimeSpan.FromSeconds(3));
                                 continue;
                             }
@@ -386,17 +388,14 @@ namespace LoginRelay.Core
                             }
                             if (appeared == null || !appeared.Openable)
                             {
-                                if (appeared != null)
-                                {
-                                    // The accessory device is there but libusb can't open it: no WinUSB driver for it.
-                                    PublishUsb(gen, phone, candidates, UsbText.CantOpenDetail, true);
-                                }
-                                else
-                                {
-                                    PublishUsb(gen, phone, candidates, "The phone didn't switch to accessory mode.");
-                                }
+                                // Either the accessory device is there but libusb can't open it, or the phone accepted
+                                // the switch and never came back as an accessory. On Windows both are what a missing
+                                // WinUSB driver for the accessory device looks like.
+                                driverHint = true;
+                                PublishUsb(gen, phone, candidates, UsbText.CantOpenDetail, true);
                                 continue;
                             }
+                            driverHint = false;
                             openLocation = appeared.Location;
                         }
 
@@ -429,6 +428,10 @@ namespace LoginRelay.Core
                             if (openError != null && (code == UsbCode.NoDriver || code == UsbCode.Permission))
                             {
                                 PublishUsb(gen, phone, candidates, UsbText.CantOpenDetail, true);
+                            }
+                            else if (code == UsbCode.Busy)
+                            {
+                                PublishUsb(gen, phone, candidates, UsbText.BusyDetail);
                             }
                             else
                             {
@@ -526,24 +529,6 @@ namespace LoginRelay.Core
                     {
                     }
                 }
-            }
-        }
-
-        /// <summary>Stops the adb server if there is one. Silent when there isn't.</summary>
-        private bool StopAdbServerOnce()
-        {
-            try
-            {
-                bool stopped = StopAdbServer();
-                if (stopped)
-                {
-                    LogAsync("Another program had the phone open, probably the adb server. Stopped it (it restarts when needed).");
-                }
-                return stopped;
-            }
-            catch (Exception)
-            {
-                return false;
             }
         }
     }

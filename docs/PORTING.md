@@ -4,8 +4,8 @@ The macOS app (`macos/Sources/*.swift`) is the reference implementation. A port 
 must behave the same way; the strings and timings below are the contract. When this file and the
 Swift code disagree, the Swift code wins (and this file needs fixing).
 
-Desktop apps from 0.5.0 on talk to the phone **only over USB, in Android's USB accessory mode**. The
-older adb transport lives on in the v0.4.0 release; the phone app still serves it, but nothing here uses it.
+Desktop apps (and the phone app) talk **only over USB, in Android's USB accessory mode**. There is no adb
+support; the older adb transport lives only in the v0.4.0 release.
 
 Three things are shared on purpose:
 
@@ -74,7 +74,9 @@ marker must be written by the loop thread itself, so a modal dialog on the UI th
 **Phases** (derived, not stored): no phone → connecting (a phone is plugged in; detail says what we're waiting
 for, and while the link isn't alive yet the headline is "Connecting to <phone>…") → ready → working (a login is
 in progress). A phone that is present but can't be opened gets a plain "Can't open the phone" status
-(Windows: no WinUSB driver; see the README), with no guided repair.
+(Windows: no WinUSB driver). The detail says a WinUSB driver is probably missing, names Zadig and links the
+README's "Windows drivers" section (https://github.com/clippycoder/login-relay#windows-drivers); a "Driver
+Help…" menu item opens that link. There is no guided repair.
 
 **One login**, on the UI thread, when `open` arrives:
 
@@ -116,7 +118,7 @@ Where the OS starts a *second process* for each URL (Windows, Linux), the second
 `--url` to the first through single-instance IPC and exit.
 
 **The phone app is not managed from the desktop.** The desktop apps may bundle `login-relay.apk` so the user
-can find it, but nothing installs or updates it (that needed adb).
+can find it, but nothing installs or updates it.
 
 ## USB accessory mode
 
@@ -146,16 +148,15 @@ Strings: 0 manufacturer `Login Relay`, 1 model `Desktop` (these two must match t
 2 description = the computer's name (shown on the phone), 3 version `1`, 4 URI
 `https://github.com/clippycoder/login-relay`, 5 serial = the location id.
 
-The phone reappears as Google VID `0x18D1`, PID `0x2D00..0x2D05` (`2D01` = accessory + adb) at the same
+The phone reappears as Google VID `0x18D1`, PID `0x2D00..0x2D05` (`2D01` = accessory + a debugging interface) at the same
 bus location. Android gives up if the host hasn't reconnected in 10 s, so poll for ~12 s. Interface 0 has one
-bulk IN and one bulk OUT endpoint; claim only that one (with `2D01` interface 1 is adb). Open the interface
-**directly, not the whole device**: an adb server usually holds a phone exclusively (macOS reports
-`kIOReturnExclusiveAccess`, 0xe00002c5, on the *switch*); the macOS app stops the adb server in that case,
-which restarts when needed. (This is a best-effort `adb kill-server` from an adb found in `PATH` or the
-usual SDK locations; having no adb at all is normal and silent.)
+bulk IN and one bulk OUT endpoint; claim only that one (with `2D01` interface 1 is the debugging interface). Open the interface
+**directly, not the whole device**: another program (such as a debugging tool's server) can hold a phone
+exclusively (macOS reports `kIOReturnExclusiveAccess`, 0xe00002c5, on the *switch*). Don't try to stop that
+program: report "Another program has the phone open. Close it, then choose Check Again." and keep retrying.
 
 **Candidates.** Only ask a device about AOA if it exposes an interface with class/subclass/protocol
-`06/01/*` (PTP/MTP), `FF/42/01` (adb) or `FF/FF/00` (vendor MTP), or is already in accessory mode. Never
+`06/01/*` (PTP/MTP), `FF/42/01` (a phone's debugging interface) or `FF/FF/00` (vendor MTP), or is already in accessory mode. Never
 probe anything else: an unrelated Qualcomm download-mode device was on the bus during testing and must be
 left alone. One candidate is used automatically; with several the user picks (`usbSelected`). Rate-limit
 switch attempts (one per 20 s per location; forget a location when it leaves the bus).

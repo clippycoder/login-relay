@@ -18,7 +18,7 @@ from loginrelay.usbframing import LineSplitter, usb_frame  # noqa: E402
 class FakePhone:
     """The Login Relay app on a phone, as seen through the accessory pipe."""
 
-    def __init__(self, version="0.5.0"):
+    def __init__(self, version="0.6.0"):
         self.version = version
         self.app_running = True          # False: nothing answers on the other end of the pipe
         self.answer_ping = True
@@ -370,7 +370,7 @@ def make_fake_usb(devices):
 
 
 def phone_interfaces():
-    """A phone in file-transfer mode: MTP and ADB interfaces."""
+    """A phone in file-transfer mode: MTP and debugging interfaces."""
     return [FakeInterface(0, 0xFF, 0xFF, 0x00), FakeInterface(1, 0xFF, 0x42, 0x01)]
 
 

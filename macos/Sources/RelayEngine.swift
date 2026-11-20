@@ -409,12 +409,7 @@ final class RelayEngine {
                 if let last = lastSwitch[t.location], Date().timeIntervalSince(last) < 20 { pause(1); continue }
                 lastSwitch[t.location] = Date()
                 publish(device, candidates, "Asking \(t.name) to switch to USB accessory mode…")
-                var r = Usb.switchToAccessory(location: t.location, hostName: hostName)
-                if r.code == Int32(AOA_ERR_OPEN), r.iokit == Usb.exclusiveAccess, Usb.stopAdbServer() {
-                    logAsync("Another program had the phone open; asked it to let go.")
-                    pause(1)
-                    r = Usb.switchToAccessory(location: t.location, hostName: hostName)
-                }
+                let r = Usb.switchToAccessory(location: t.location, hostName: hostName)
                 if r.code != 0 {
                     publish(device, candidates, Usb.errorText(r, name: t.name))
                     pause(3)
@@ -439,7 +434,12 @@ final class RelayEngine {
                 guard current() else { return }
                 let o = Usb.open(location: t.location)
                 if let c = o.conn { opened = c; break }
-                if attempt == 5 { publish(device, candidates, "Couldn't open the accessory connection (error \(o.code)).") }
+                if attempt == 5 {
+                    let detail = o.code == Int32(AOA_ERR_OPEN) && o.iokit == Usb.exclusiveAccess
+                        ? "Another program has the phone open. Close it, then choose Check Again."
+                        : "Couldn't open the accessory connection (error \(o.code))."
+                    publish(device, candidates, detail)
+                }
                 usleep(500_000)
             }
             guard let conn = opened else { pause(3); continue }

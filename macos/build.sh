@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION=0.5.0
+VERSION=0.6.0
 BUILD=1
 APK=../android/build/login-relay.apk
 APP="build/Login Relay.app"

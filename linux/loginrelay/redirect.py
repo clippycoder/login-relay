@@ -162,25 +162,3 @@ class RelayRequest:
         if self.state is not None and url_params(callback).get("state") != self.state:
             return STATE_MISMATCH
         return OK
-
-
-def shell_quote(s: str) -> str:
-    """Quotes a string for a POSIX shell. Nothing in this app needs it any more; it stays because
-    tests/vectors.json shares these cases with the other desktop apps."""
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def _num(part: str) -> int:
-    return int(part) if part.isascii() and part.isdigit() else 0
-
-
-def version_less(a: str, b: str) -> bool:
-    """Dotted-number comparison: "0.2.2" < "0.3.0"."""
-    x = [_num(p) for p in a.split(".") if p]
-    y = [_num(p) for p in b.split(".") if p]
-    for i in range(max(len(x), len(y))):
-        left = x[i] if i < len(x) else 0
-        right = y[i] if i < len(y) else 0
-        if left != right:
-            return left < right
-    return False

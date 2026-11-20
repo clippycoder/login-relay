@@ -115,7 +115,6 @@ class EngineCase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="lr-eng-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.prefs = Prefs(os.path.join(self.tmp, "prefs.json"))
-        self.adb_stops = []
         self.changes = 0
 
     @staticmethod
@@ -137,8 +136,7 @@ class EngineCase(unittest.TestCase):
         args = dict(self.engine_args)
         args.update(extra)
         # The engine gets no usb_backend: it must pick the fake phone up from the environment itself.
-        # stop_adb is stubbed so a test can never run a real `adb kill-server`.
-        self.engine = eng.RelayEngine(self.host, self.prefs, stop_adb=lambda: self.adb_stops.append(1) or True, **args)
+        self.engine = eng.RelayEngine(self.host, self.prefs, **args)
 
         def changed():
             if not self.host.on_ui():
@@ -404,8 +402,8 @@ class FakePhoneHookTests(EngineCase):
         self.assertEqual(self.engine.device.serial, "usb:fake")
         self.assertEqual(eng.describe(self.engine),
                          ("Fake Phone is ready", "Sign in to an app on the phone and the page opens here."))
-        self.assertEqual(self.engine.phone_version, "0.5.0")
-        self.assertIn("Login Relay 0.5.0 on the phone says hello (usb).", self.logs())
+        self.assertEqual(self.engine.phone_version, "0.6.0")
+        self.assertIn("Login Relay 0.6.0 on the phone says hello (usb).", self.logs())
         self.assertIn("USB phone: Fake Phone", self.logs())
         self.assertEqual(self.engine.usb_candidates, [])      # never offers a choice
         self.assertEqual(eng.usb_phone_choices(self.engine), ())
@@ -418,7 +416,6 @@ class FakePhoneHookTests(EngineCase):
         self.start_phone()
         self.start()
         self.wait_phase(eng.READY)
-        self.assertEqual(self.adb_stops, [])
 
     def test_default_liveness_is_a_ping_every_two_seconds(self):
         phone = self.start_phone()

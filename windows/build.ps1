@@ -19,7 +19,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
-$Version = '0.5.0'
+$Version = '0.6.0'
 $Publish = Join-Path $PSScriptRoot 'publish'
 $Zip = Join-Path $Publish "Login-Relay-Windows-x64-$Version.zip"
 
@@ -115,7 +115,7 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish (probe) failed (exit code $LAST
 Copy-Item -LiteralPath $LibusbDll -Destination (Join-Path $Probe 'libusb-1.0.dll') -Force
 Copy-Item -LiteralPath $LibusbLicense -Destination (Join-Path $Probe 'libusb-COPYING.txt') -Force
 
-# The phone app, bundled for convenience (the Windows app doesn't install it; USB accessory mode needs no adb).
+# The phone app, bundled for convenience (the Windows app doesn't install it).
 $Apk = if ($env:LOGINRELAY_APK) { $env:LOGINRELAY_APK } else { Join-Path $PSScriptRoot '..\android\build\login-relay.apk' }
 if (Test-Path -LiteralPath $Apk) {
     $ApkTarget = Join-Path $Publish 'login-relay.apk'

@@ -212,6 +212,10 @@ namespace LoginRelay.App
             {
                 AddItem("Check Again", _engine.CheckAgain);
             }
+            if (phase.Kind == PhaseKind.CantOpen)
+            {
+                AddItem("Driver Help…", _engine.OpenDriverHelp);
+            }
 
             if (_engine.UsbCandidates.Count > 1)
             {

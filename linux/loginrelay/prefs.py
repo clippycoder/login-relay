@@ -56,8 +56,8 @@ def find_share_file(relative: str, env=None) -> Optional[str]:
 
 
 class Prefs:
-    """Selected USB phone, notifications, launch-at-login, first-launch flag. (Keys written by older versions,
-    such as adbPath, selectedSerial and transport, are ignored and left alone.)"""
+    """Selected USB phone, notifications, launch-at-login, first-launch flag. (Keys written by older versions
+    are ignored and left alone.)"""
 
     def __init__(self, path: Optional[str] = None):
         self.path = path or default_prefs_path()

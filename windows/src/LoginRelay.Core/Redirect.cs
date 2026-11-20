@@ -167,37 +167,6 @@ namespace LoginRelay.Core
             string s = url.Substring(0, colon).ToLowerInvariant();
             return s.Length == 0 ? null : s;
         }
-
-        /// <summary>Quotes a string for the phone's shell (adb shell joins its arguments and re-parses them).</summary>
-        public static string ShellQuote(string s)
-        {
-            return "'" + s.Replace("'", "'\"'\"'") + "'";
-        }
-
-        /// <summary>Dotted-number comparison: "0.2.2" is less than "0.3.0".</summary>
-        public static bool VersionLess(string a, string b)
-        {
-            int[] x = ParseVersion(a);
-            int[] y = ParseVersion(b);
-            int n = Math.Max(x.Length, y.Length);
-            for (int i = 0; i < n; i++)
-            {
-                int l = i < x.Length ? x[i] : 0;
-                int r = i < y.Length ? y[i] : 0;
-                if (l != r)
-                {
-                    return l < r;
-                }
-            }
-            return false;
-        }
-
-        private static int[] ParseVersion(string v)
-        {
-            return v.Split('.', StringSplitOptions.RemoveEmptyEntries)
-                .Select(part => int.TryParse(part, out int n) ? n : 0)
-                .ToArray();
-        }
     }
 
     /// <summary>One page the phone asked to have opened.</summary>

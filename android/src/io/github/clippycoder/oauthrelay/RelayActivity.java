@@ -12,9 +12,6 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbManager;
-import android.net.LocalServerSocket;
-import android.net.LocalSocket;
-import android.net.LocalSocketAddress;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -35,7 +32,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -43,12 +39,10 @@ import java.nio.charset.StandardCharsets;
  * this activity holds it and hands it to a Login Relay desktop app, which opens it in a real
  * browser and catches the redirect. The page never loads on the phone.
  *
- * Two ways to reach the computer, both carrying the same newline-delimited JSON:
- *  - adb: an abstract unix socket "oauthrelay" that the computer reaches with `adb forward`. The
- *    computer returns the redirect with `adb shell am start`.
- *  - USB accessory mode (AOA): no USB debugging needed. The computer switches the phone into
- *    accessory mode over the cable and Android connects this app to it. The computer sends the
- *    redirect as a "callback" message and the phone hands it to the app itself.
+ * The computer is reached over USB accessory mode (AOA), carrying newline-delimited JSON. The
+ * computer switches the phone into accessory mode over the cable and Android connects this app to
+ * it. The computer sends the redirect as a "callback" message and the phone hands it to the app
+ * itself.
  *
  * Messages:
  *   phone to computer: {"v":1,"type":"hello","transport":..,"version":..},
@@ -59,7 +53,6 @@ import java.nio.charset.StandardCharsets;
  */
 public class RelayActivity extends Activity {
     static final String TAG = "OAuthRelay";
-    static final String SOCKET_NAME = "oauthrelay";
     static final String ACTION_USB_PERMISSION = "io.github.clippycoder.oauthrelay.USB_PERMISSION";
     // Where to get the computer side. Shown on the phone's own screen.
     static final String HOST_COMMAND = "github.com/clippycoder/login-relay";
@@ -69,11 +62,6 @@ public class RelayActivity extends Activity {
     private static final int READ_BUFFER = 16384;
     private static final int MAX_LINE = 1024 * 1024;
     private static final long FINISH_DELAY_MS = 1500;
-
-    // Only adb (shell) and root may talk to the relay; any app could otherwise connect to an
-    // abstract socket.
-    private static final int UID_ROOT = 0;
-    private static final int UID_SHELL = 2000;
 
     private enum State { IDLE, WAITING, SENT, DROPPED }
 
@@ -96,7 +84,6 @@ public class RelayActivity extends Activity {
     private volatile boolean closing;
     private volatile Link link;
     private Link helloedLink;  // the link we've already said hello on, so a re-adopt doesn't repeat it
-    private LocalServerSocket server;
     private BroadcastReceiver permissionReceiver;
 
     // ------------------------------------------------------------------ lifecycle
@@ -123,7 +110,6 @@ public class RelayActivity extends Activity {
             }
         });
 
-        startServer();
         adoptUsb(null);
         handle(getIntent());
     }
@@ -158,7 +144,6 @@ public class RelayActivity extends Activity {
             } catch (IllegalArgumentException ignored) {
             }
         }
-        stopServer();
         super.onDestroy();
     }
 
@@ -370,153 +355,6 @@ public class RelayActivity extends Activity {
             } else {
                 updateConnection();
             }
-        }
-    }
-
-    // ------------------------------------------------------------------ adb link
-
-    private static final class AdbLink implements Link {
-        private final LocalSocket socket;
-        private final OutputStream out;
-
-        AdbLink(LocalSocket socket) throws IOException {
-            this.socket = socket;
-            this.out = socket.getOutputStream();
-        }
-
-        @Override
-        public synchronized boolean send(String json) {
-            try {
-                out.write((json + "\n").getBytes(StandardCharsets.UTF_8));
-                out.flush();
-                return true;
-            } catch (IOException e) {
-                Log.w(TAG, "send failed", e);
-                return false;
-            }
-        }
-
-        @Override
-        public String describe(Context c) {
-            return c.getString(R.string.computer_connected);
-        }
-
-        @Override
-        public String transport() {
-            return "adb";
-        }
-
-        void close() {
-            // close() alone neither wakes the thread blocked reading nor sends EOF to adb; shutdown does both.
-            try {
-                socket.shutdownInput();
-            } catch (IOException ignored) {
-            }
-            try {
-                socket.shutdownOutput();
-            } catch (IOException ignored) {
-            }
-            try {
-                socket.close();
-            } catch (IOException ignored) {
-            }
-        }
-    }
-
-    private void startServer() {
-        try {
-            server = new LocalServerSocket(SOCKET_NAME);
-        } catch (IOException e) {
-            Log.e(TAG, "cannot bind @" + SOCKET_NAME, e);
-            show(State.IDLE, getString(R.string.bind_failed));
-            return;
-        }
-        Thread t = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                acceptLoop();
-            }
-        }, "oauthrelay-server");
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private void stopServer() {
-        if (server == null) {
-            return;
-        }
-        // LocalServerSocket.close() does not unblock a pending accept(); poke it with a connection.
-        try {
-            LocalSocket poke = new LocalSocket();
-            poke.connect(new LocalSocketAddress(SOCKET_NAME));
-            poke.close();
-        } catch (IOException ignored) {
-        }
-        try {
-            server.close();
-        } catch (IOException ignored) {
-        }
-        // Also drop the computer's connection; otherwise the helper stays attached to this dead
-        // instance and never reaches the next Login Relay screen.
-        Link l = link;
-        if (l instanceof AdbLink) {
-            ((AdbLink) l).close();
-        }
-    }
-
-    private void acceptLoop() {
-        while (!closing) {
-            LocalSocket s;
-            try {
-                s = server.accept();
-            } catch (IOException e) {
-                if (!closing) {
-                    Log.e(TAG, "accept failed", e);
-                }
-                return;
-            }
-            if (closing) {
-                closeQuietly(s);
-                return;
-            }
-            int uid;
-            try {
-                uid = s.getPeerCredentials().getUid();
-            } catch (IOException e) {
-                closeQuietly(s);
-                continue;
-            }
-            if (uid != UID_SHELL && uid != UID_ROOT) {
-                Log.w(TAG, "refused connection from uid " + uid);
-                closeQuietly(s);
-                continue;
-            }
-            serve(s);
-        }
-    }
-
-    private void serve(LocalSocket s) {
-        AdbLink l;
-        try {
-            l = new AdbLink(s);
-        } catch (IOException e) {
-            closeQuietly(s);
-            return;
-        }
-        link = l;
-        onLinkUp();
-        try {
-            pumpLines(s.getInputStream(), new LineSink() {
-                @Override
-                public void onLine(String line) {
-                    onMessage(line);
-                }
-            });
-        } catch (IOException e) {
-            Log.w(TAG, "client dropped", e);
-        } finally {
-            l.close();
-            linkLost(l);
         }
     }
 
@@ -801,13 +639,6 @@ public class RelayActivity extends Activity {
             }
         } catch (JSONException e) {
             Log.w(TAG, "encode failed", e);
-        }
-    }
-
-    private static void closeQuietly(LocalSocket s) {
-        try {
-            s.close();
-        } catch (IOException ignored) {
         }
     }
 }

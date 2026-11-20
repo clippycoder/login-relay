@@ -157,8 +157,8 @@ namespace LoginRelay.Core
         }
 
         /// <summary>
-        /// Does this device expose an interface Android phones use for MTP/PTP or ADB? Interfaces are
-        /// (class, subclass, protocol) triples: 06/01/* (PTP, MTP), FF/42/01 (adb), FF/FF/00 (vendor MTP).
+        /// Does this device expose an interface Android phones use for file transfer or debugging? Interfaces are
+        /// (class, subclass, protocol) triples: 06/01/* (PTP, MTP), FF/42/01 (the debugging interface), FF/FF/00 (vendor MTP).
         /// </summary>
         public static bool LooksLikePhone(IEnumerable<(int Class, int Sub, int Protocol)> interfaces)
         {
@@ -260,7 +260,13 @@ namespace LoginRelay.Core
         /// <summary>The one status shown when the phone is plugged in but libusb can't open it.</summary>
         public const string CantOpenHeadline = "Can't open the phone";
 
-        public const string CantOpenDetail = "Login Relay needs a WinUSB driver for the phone. See “Windows drivers” in the README (github.com/clippycoder/login-relay).";
+        public const string CantOpenDetail = "Windows probably needs a WinUSB driver for the phone. The free tool Zadig can install one (zadig.akeo.ie); see “Windows drivers” in the README: github.com/clippycoder/login-relay#windows-drivers";
+
+        /// <summary>The address "Driver Help…" opens (the README section the status text points to).</summary>
+        public const string DriverHelpUrl = "https://github.com/clippycoder/login-relay#windows-drivers";
+
+        /// <summary>Another program has the phone's USB interface open.</summary>
+        public const string BusyDetail = "Another program has the phone open. Close it, then choose Check Again.";
 
         /// <summary>No phone found: the same wording on every screen.</summary>
         public const string NoPhoneHeadline = "No phone found over USB";
@@ -291,7 +297,7 @@ namespace LoginRelay.Core
                 case UsbCode.Unsupported:
                     return name + " doesn't answer the USB accessory protocol.";
                 case UsbCode.Busy:
-                    return "Another program has " + name + " open (usually adb).";
+                    return BusyDetail;
                 case UsbCode.Open:
                     return "Couldn't open " + name + " over USB.";
                 case UsbCode.NotFound:

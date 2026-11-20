@@ -21,6 +21,7 @@ from loginrelay import usbaoa  # noqa: E402
 from loginrelay.prefs import Prefs  # noqa: E402
 from loginrelay.usblink import UsbPhoneLink  # noqa: E402
 
+BUSY_TEXT = "Another program has Pixel 7 open. Close it, then choose Check Again."
 NO_PERMISSION = "No permission to use the phone over USB. Install the udev rule from the package, or run with sudo."
 
 
@@ -36,7 +37,7 @@ class HelperTests(unittest.TestCase):
     def test_which_devices_look_like_phones(self):
         self.assertTrue(usbaoa.looks_like_phone([(0x06, 0x01, 0x01)]))             # PTP
         self.assertTrue(usbaoa.looks_like_phone([(0x06, 0x01, 0x00)]))
-        self.assertTrue(usbaoa.looks_like_phone([(0xFF, 0x42, 0x01)]))             # ADB interface class (recognises the phone only)
+        self.assertTrue(usbaoa.looks_like_phone([(0xFF, 0x42, 0x01)]))             # debugging interface class (recognises the phone only)
         self.assertTrue(usbaoa.looks_like_phone([(0xFF, 0xFF, 0x00)]))             # vendor MTP
         self.assertTrue(usbaoa.looks_like_phone([(0x08, 0x06, 0x50), (0xFF, 0x42, 0x01)]))
         self.assertFalse(usbaoa.looks_like_phone([(0xFF, 0xFF, 0xFF)]))            # Qualcomm download mode
@@ -74,7 +75,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_UNAVAILABLE, "X"), "USB mode needs the python3-usb package")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_UNSUPPORTED, "Pixel"),
                          "Pixel doesn't answer the USB accessory protocol.")
-        self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_BUSY, "Pixel"), "Another program has Pixel open.")
+        self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_BUSY, "Pixel"), "Another program has Pixel open. Close it, then choose Check Again.")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_OPEN, "Pixel"), "Couldn't open Pixel over USB.")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_NOT_FOUND, "Pixel"), "Pixel disappeared.")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_REQUEST, "Pixel"),
@@ -391,11 +392,9 @@ class UsbEngineCase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="lr-usb-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.prefs = Prefs(os.path.join(self.tmp, "prefs.json"))
-        self.adb_stops = []     # calls to the (fake) "stop the adb server" helper; the real one never runs in tests
         args = dict(usb_backend=self.world, usb_host_name="Test Mac", usb_idle_pause=0.1, usb_recheck=0.2,
                     usb_switch_poll=0.05, usb_switch_polls=40, usb_open_wait=0.05, usb_error_pause=0.3,
-                    delivery_timeout=0.8, usb_link_args=dict(ping_interval=0.2, silence=1.0),
-                    stop_adb=self._stop_adb)
+                    delivery_timeout=0.8, usb_link_args=dict(ping_interval=0.2, silence=1.0))
         args.update(self.engine_args)
         self.engine = eng.RelayEngine(self.host, self.prefs, **args)
 
@@ -412,10 +411,6 @@ class UsbEngineCase(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-    def _stop_adb(self):
-        self.adb_stops.append(time.monotonic())
-        return True
 
     def tearDown(self):
         self.assertEqual(self.host.wrong_thread, [])
@@ -464,7 +459,6 @@ class CandidateTests(UsbEngineCase):
                           "Plug the phone in and choose “File transfer” in its USB notification. "
                           "USB debugging isn't needed."))
         self.assertEqual(self.world.switch_calls, [])
-        self.assertEqual(self.adb_stops, [])             # nothing was busy, so adb is never touched
 
     def test_unrelated_devices_are_never_touched(self):
         self.world.add_other("1-7")                       # Qualcomm download mode
@@ -596,40 +590,20 @@ class SwitchTests(UsbEngineCase):
         self.start()
         self.wait_until_detail("Pixel 7 doesn't answer the USB accessory protocol.")
 
-    def test_busy_on_open_stops_the_adb_server_and_retries(self):
+    def test_busy_on_open_is_retried_and_reported(self):
         self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_BUSY, "Resource busy")
         self.world.add_phone("1-4", accessory=True, pid=0x2D01)
         self.start()
-        wait_until(lambda: self.adb_stops, 5, "the adb server to be stopped")
-        self.wait_log("Pixel 7 is busy. Stopped the adb server that was probably holding it.")
         wait_until(lambda: len(self.world.open_calls) >= 3, 5, "the retries")
-        self.world.open_error = None                      # adb let go
+        self.wait_until_detail(BUSY_TEXT)
+        self.world.open_error = None                      # the other program let go
         self.wait_phase(eng.READY)
-        self.assertEqual(len(self.adb_stops), 1)          # once, not once per attempt
 
-    def test_busy_on_the_switch_stops_the_adb_server(self):
+    def test_busy_on_the_switch_is_reported(self):
         self.world.switch_error = usbaoa.SwitchResult(usbaoa.AOA_ERR_BUSY, 0, "Resource busy")
         self.world.add_phone("1-4")
         self.start()
-        self.wait_until_detail("Another program has Pixel 7 open.")
-        self.assertEqual(len(self.adb_stops), 1)
-
-    def test_the_adb_server_is_not_stopped_again_and_again(self):
-        self.engine._adb_stop_interval = 60
-        self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_BUSY, "Resource busy")
-        self.world.add_phone("1-4", accessory=True, pid=0x2D01)
-        self.start()
-        wait_until(lambda: len(self.world.open_calls) >= 14, 10, "two rounds of retries")
-        self.assertEqual(len(self.adb_stops), 1)
-
-    def test_no_adb_installed_is_silent(self):
-        self.engine._stop_adb = lambda: False
-        self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_BUSY, "Resource busy")
-        self.world.add_phone("1-4", accessory=True, pid=0x2D01)
-        self.start()
-        wait_until(lambda: len(self.world.open_calls) >= 3, 5, "the retries")
-        self.assertFalse([t for t in self.logs() if "adb" in t])
-        self.wait_until_detail("Another program has Pixel 7 open.")
+        self.wait_until_detail(BUSY_TEXT)
 
     def test_permission_denied_on_open_is_not_retried_forever(self):
         self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_PERMISSION, NO_PERMISSION)
@@ -674,10 +648,10 @@ class SessionTests(UsbEngineCase):
         self.assertFalse(self.engine.usb_alive)
         # The app comes up on the phone: hello, then it answers pings.
         phone.app_running = True
-        phone.send({"v": 1, "type": "hello", "transport": "usb", "version": "0.5.0"})
+        phone.send({"v": 1, "type": "hello", "transport": "usb", "version": "0.6.0"})
         self.wait_phase(eng.READY)
-        self.assertEqual(self.engine.phone_version, "0.5.0")
-        self.assertIn("Login Relay 0.5.0 on the phone says hello (usb).", self.logs())
+        self.assertEqual(self.engine.phone_version, "0.6.0")
+        self.assertIn("Login Relay 0.6.0 on the phone says hello (usb).", self.logs())
         self.assertIn("Login Relay on the phone is answering.", self.logs())
         self.assertEqual(eng.describe(self.engine),
                          ("Pixel 7 is ready", "Sign in to an app on the phone and the page opens here."))
@@ -703,7 +677,6 @@ class SessionTests(UsbEngineCase):
         self.assertIsNone(self.engine._awaiting_delivery)
         time.sleep(1.0)
         self.assertNotIn("The phone didn't confirm it handed the result to the app.", self.logs())
-        self.assertEqual(self.adb_stops, [])
         self.assertEqual(self.engine.phase.kind, eng.READY)
 
     def test_a_decoy_return_address_is_ignored(self):
@@ -809,9 +782,9 @@ class SessionTests(UsbEngineCase):
         self.assertEqual(len(self.world.connections), 1)
         # A sign-in starts the app again; it says hello over the same pipe and answers pings.
         phone.app_running = True
-        phone.send({"v": 1, "type": "hello", "transport": "usb", "version": "0.5.0"})
+        phone.send({"v": 1, "type": "hello", "transport": "usb", "version": "0.6.0"})
         wait_until(lambda: self.engine.usb_alive, 5, "alive again")
-        self.assertEqual(self.engine.phone_version, "0.5.0")
+        self.assertEqual(self.engine.phone_version, "0.6.0")
         url, redirect = authorize_url("STATE-IDLE")
         phone.send_open(url)
         self.wait_active()
@@ -869,14 +842,13 @@ class MenuTests(UsbEngineCase):
     def test_prefs_from_older_versions_are_ignored_and_kept(self):
         path = os.path.join(self.tmp, "old.json")
         with open(path, "w") as f:
-            f.write('{"transport": "adb", "adbPath": "/opt/adb", "selectedSerial": "ABC", "notifications": true}')
+            f.write('{"transport": "usb", "selectedSerial": "ABC", "notifications": true}')
         p = Prefs(path)
         self.assertTrue(p.notifications)
-        for name in ("transport", "adb_path", "selected_serial"):
+        for name in ("transport", "selected_serial"):
             self.assertFalse(hasattr(p, name), name)
-        e = eng.RelayEngine(FakeHost(), p, usb_backend=self.world, stop_adb=self._stop_adb)
+        e = eng.RelayEngine(FakeHost(), p, usb_backend=self.world)
         self.assertFalse(hasattr(e, "transport"))
-        self.assertFalse(hasattr(e, "adb"))
 
     def test_the_menu_and_window_data_with_no_phone(self):
         self.start()
@@ -904,14 +876,13 @@ class MenuTests(UsbEngineCase):
         self.assertEqual(eng.describe(self.engine),
                          ("Pixel 7 is ready", "Sign in to an app on the phone and the page opens here."))
 
-    def test_nothing_in_the_ui_mentions_adb_or_installing(self):
+    def test_nothing_in_the_ui_mentions_installing(self):
         self.ready_phone()
         for e in eng.menu_model(self.engine):
-            self.assertNotIn("adb", e.label.lower())
             self.assertNotIn("install", e.label.lower())
             self.assertNotIn("connect over", e.label.lower())
-        for name in ("A_DOWNLOAD", "A_CHOOSE_ADB", "A_INSTALL", "A_OPEN", "A_SET_TRANSPORT", "A_SELECT_PHONE",
-                     "NO_ADB", "NEEDS_APP", "UNAUTHORIZED", "ADB", "transport_choices", "find_bundled"):
+        for name in ("A_DOWNLOAD", "A_INSTALL", "A_OPEN", "A_SET_TRANSPORT", "A_SELECT_PHONE",
+                     "NEEDS_APP", "UNAUTHORIZED", "transport_choices", "find_bundled"):
             self.assertFalse(hasattr(eng, name), name)
 
     def test_working_menu(self):

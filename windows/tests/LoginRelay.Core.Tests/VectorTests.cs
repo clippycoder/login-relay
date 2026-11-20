@@ -144,46 +144,5 @@ namespace LoginRelay.Core.Tests
             }
             Finish(failures, count);
         }
-
-        [Fact]
-        public void ShellQuote()
-        {
-            JsonElement root = Load();
-            var failures = new List<string>();
-            int count = 0;
-            foreach (JsonElement c in root.GetProperty("shellQuote").EnumerateArray())
-            {
-                count++;
-                string input = c[0].GetString()!;
-                string expected = c[1].GetString()!;
-                string actual = Redirect.ShellQuote(input);
-                if (actual != expected)
-                {
-                    failures.Add("shellQuote(" + input + "): expected " + expected + " but was " + actual);
-                }
-            }
-            Finish(failures, count);
-        }
-
-        [Fact]
-        public void VersionLess()
-        {
-            JsonElement root = Load();
-            var failures = new List<string>();
-            int count = 0;
-            foreach (JsonElement c in root.GetProperty("versionLess").EnumerateArray())
-            {
-                count++;
-                string a = c[0].GetString()!;
-                string b = c[1].GetString()!;
-                bool expected = c[2].GetBoolean();
-                bool actual = Redirect.VersionLess(a, b);
-                if (actual != expected)
-                {
-                    failures.Add("versionLess(" + a + ", " + b + "): expected " + expected + " but was " + actual);
-                }
-            }
-            Finish(failures, count);
-        }
     }
 }

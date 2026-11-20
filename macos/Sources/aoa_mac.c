@@ -68,7 +68,7 @@ static void for_each_device(void (*visit)(io_service_t, void *), void *ctx) {
     }
 }
 
-// Does this device expose an interface that Android phones use for MTP/PTP or ADB?
+// Does this device expose an interface that Android phones use for MTP/PTP or a debugging interface?
 static int has_android_interface(io_service_t dev) {
     io_iterator_t kids = 0;
     if (IORegistryEntryGetChildIterator(dev, kIOServicePlane, &kids) != KERN_SUCCESS || !kids) return 0;
@@ -80,7 +80,7 @@ static int has_android_interface(io_service_t dev) {
             prop_int(k, CFSTR("bInterfaceSubClass"), &sub);
             prop_int(k, CFSTR("bInterfaceProtocol"), &proto);
             if ((cls == 0x06 && sub == 0x01)                  // still image / PTP / MTP
-                || (cls == 0xFF && sub == 0x42 && proto == 0x01)  // ADB
+                || (cls == 0xFF && sub == 0x42 && proto == 0x01)  // a phone's debugging interface
                 || (cls == 0xFF && sub == 0xFF && proto == 0x00)) // vendor-specific MTP
                 found = 1;
         }
@@ -164,7 +164,7 @@ static IOUSBDeviceInterface320 **open_device(io_service_t svc) {
         g_last_kr = (uint32_t)hr;
         return NULL;
     }
-    // Other programs (the system's camera/MTP helpers, an adb server) may hold a phone; ask them to let go.
+    // Other programs (the system's camera/MTP helpers, other USB tools) may hold a phone; ask them to let go.
     kr = (*dev)->USBDeviceOpenSeize(dev);
     if (kr != kIOReturnSuccess) {
         g_last_kr = (uint32_t)kr;
@@ -257,8 +257,8 @@ aoa_conn *aoa_open(uint32_t location_id, int *error_out) {
         return NULL;
     }
 
-    // The accessory is interface 0 (with 18D1:2D01 there is a second one for adb). Open that interface
-    // directly rather than the whole device: an adb server usually holds the device exclusively, and
+    // The accessory is interface 0 (with 18D1:2D01 there is a second, debugging one). Open that interface
+    // directly rather than the whole device: another program may hold the device exclusively, and
     // this way we don't have to compete with it for something we don't need.
     io_service_t isvc = find_interface(svc, 0);
     IOObjectRelease(svc);

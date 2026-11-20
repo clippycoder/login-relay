@@ -1,97 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The small non-UI pieces, one at a time: the stop-the-adb-server helper, the TCP stand-in for a USB pipe, prefs."""
+"""The small non-UI pieces, one at a time: the TCP stand-in for a USB pipe, prefs."""
 import json
 import os
 import socket
 import sys
 import tempfile
-import time
 import unittest
-from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import stable_fds, assert_fds_flat, wait_until  # noqa: E402
 
-from loginrelay import adbserver, fakephone, usbaoa  # noqa: E402
+from loginrelay import fakephone, usbaoa  # noqa: E402
 from loginrelay.prefs import Prefs  # noqa: E402
-
-
-def make_adb(directory, body, name="adb"):
-    p = os.path.join(directory, name)
-    with open(p, "w") as f:
-        f.write("#!/bin/sh\n" + body + "\n")
-    os.chmod(p, 0o755)
-    return p
-
-
-class AdbServerHelperTests(unittest.TestCase):
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="lr-adb-")
-        self.log = os.path.join(self.dir, "calls")
-
-    def env(self, **kw):
-        env = {"HOME": self.dir, "PATH": self.dir}
-        env.update(kw)
-        return env
-
-    def test_runs_kill_server(self):
-        make_adb(self.dir, 'echo "$@" >> "%s"' % self.log)
-        self.assertTrue(adbserver.stop_adb_server(env=self.env()))
-        with open(self.log) as f:
-            self.assertEqual(f.read().strip(), "kill-server")
-
-    def test_no_adb_is_silent(self):
-        empty = tempfile.mkdtemp(prefix="lr-empty-")
-        # Some machines (CI runners) really have an SDK in a system folder, so take those out of the search.
-        with mock.patch.object(adbserver, "SYSTEM_SDK_ROOTS", ()):
-            self.assertIsNone(adbserver.find_adb({"HOME": empty, "PATH": empty}))
-            self.assertFalse(adbserver.stop_adb_server(env={"HOME": empty, "PATH": empty}))
-
-    def test_does_not_wait_for_a_daemon_that_inherited_the_output(self):
-        # `adb kill-server` / start-server can leave a daemon holding stdout. With pipes we would wait for
-        # end-of-file until it exits.
-        make_adb(self.dir, '(sleep 20) &\nexit 0')
-        t0 = time.time()
-        self.assertTrue(adbserver.stop_adb_server(env=self.env()))
-        self.assertLess(time.time() - t0, 5)
-
-    def test_gives_up_on_an_adb_that_hangs(self):
-        make_adb(self.dir, "sleep 30")
-        t0 = time.time()
-        self.assertTrue(adbserver.stop_adb_server(timeout=0.5, env=self.env()))
-        self.assertLess(time.time() - t0, 5)
-
-    def test_a_program_that_cannot_run_is_silent(self):
-        path = os.path.join(self.dir, "adb")
-        with open(path, "w") as f:
-            f.write("not a program")
-        os.chmod(path, 0o755)
-        self.assertFalse(adbserver.stop_adb_server(env=self.env()))
-
-    def test_search_order(self):
-        home = tempfile.mkdtemp(prefix="lr-home-")
-        sdk = os.path.join(home, "sdk", "platform-tools")
-        os.makedirs(sdk)
-        in_sdk = make_adb(sdk, "exit 0")
-        self.assertEqual(adbserver.find_adb({"HOME": home, "PATH": "/nonexistent", "ANDROID_HOME": os.path.join(home, "sdk")}),
-                         in_sdk)
-        self.assertEqual(adbserver.find_adb({"HOME": home, "PATH": "/nonexistent",
-                                             "ANDROID_SDK_ROOT": os.path.join(home, "sdk")}), in_sdk)
-        default_sdk = os.path.join(home, "Android", "Sdk", "platform-tools")
-        os.makedirs(default_sdk)
-        in_default = make_adb(default_sdk, "exit 0")
-        self.assertEqual(adbserver.find_adb({"HOME": home, "PATH": "/nonexistent"}), in_default)
-        on_path = make_adb(self.dir, "exit 0")
-        self.assertEqual(adbserver.find_adb({"HOME": home, "PATH": self.dir}), on_path)   # PATH first
-
-    def test_no_file_descriptor_leak(self):
-        make_adb(self.dir, 'exit 0')
-        env = self.env()
-        adbserver.stop_adb_server(env=env)
-        before = stable_fds()
-        for _ in range(10):
-            adbserver.stop_adb_server(env=env)
-        assert_fds_flat(self, before)
 
 
 class TcpConnectionTests(unittest.TestCase):

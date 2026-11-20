@@ -217,7 +217,7 @@ namespace LoginRelay.Core.Tests
             using (var rig = new Rig(new FakePhone(null)))
             {
                 Assert.True(WaitFor(() => rig.Ui.Invoke(() => rig.Engine.Phase.Kind == PhaseKind.Ready)), "ready");
-                // The status names the one fake phone and nothing about drivers or adb.
+                // The status names the one fake phone and nothing about drivers.
                 Assert.Equal("Fake Phone", rig.Ui.Invoke(() => rig.Engine.Phone!.Title));
                 Assert.True(rig.Logged("USB connection open."));
             }

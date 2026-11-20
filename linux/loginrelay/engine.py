@@ -18,7 +18,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import adbserver, fakephone, usbaoa
+from . import fakephone, usbaoa
 from .redirect import (OK, PLAIN_LINK, SIGN_IN, STATE_MISMATCH, UNRELATED, RelayRequest,
                        url_params, url_scheme)
 from .usblink import UsbPhoneLink
@@ -35,7 +35,6 @@ USB_WAITING = ("Login Relay on the phone isn't answering yet. If Android asks to
                "otherwise just start a sign-in on the phone and Login Relay starts by itself.")
 DELIVERY_TIMEOUT = 10.0       # how long to wait for the phone to confirm it handed the result to the app
 USB_SWITCH_INTERVAL = 20.0    # at most one accessory switch attempt per phone per this many seconds
-ADB_STOP_INTERVAL = 20.0      # at most one attempt to stop an adb server holding the phone per this many seconds
 
 PhaseInfo = namedtuple("PhaseInfo", "kind device flow detail", defaults=(None,))
 
@@ -128,9 +127,7 @@ class RelayEngine:
                  usb_switch_interval: float = USB_SWITCH_INTERVAL, usb_switch_poll: float = 0.2,
                  usb_switch_polls: int = 60, usb_open_attempts: int = 6, usb_open_wait: float = 0.5,
                  usb_error_pause: float = 3.0, delivery_timeout: float = DELIVERY_TIMEOUT,
-                 usb_link_args: Optional[dict] = None,
-                 stop_adb: Optional[Callable[[], bool]] = None,
-                 adb_stop_interval: float = ADB_STOP_INTERVAL):
+                 usb_link_args: Optional[dict] = None):
         self.host = host
         self.prefs = prefs
         self._watchdog_interval = watchdog_interval
@@ -152,9 +149,6 @@ class RelayEngine:
         self._usb_error_pause = usb_error_pause
         self._delivery_timeout = delivery_timeout
         self._usb_link_args = usb_link_args or {}
-        self._stop_adb = stop_adb or adbserver.stop_adb_server
-        self._adb_stop_interval = adb_stop_interval
-        self._last_adb_stop = float("-inf")
 
         # state (UI thread)
         self.device: Optional[Device] = None
@@ -532,20 +526,6 @@ class RelayEngine:
                 self.cancel_active("Login Relay on the phone stopped answering.", notify_phone=False)
         self._changed()
 
-    def _release_adb(self, why: str) -> None:
-        """The phone was busy (something else has its USB interface). The usual culprit is a running adb
-        server, so ask it to stop. Best effort, rate-limited, and silent if there is no adb."""
-        if time.monotonic() - self._last_adb_stop < self._adb_stop_interval:
-            return
-        self._last_adb_stop = time.monotonic()
-        try:
-            ran = self._stop_adb()
-        except Exception:
-            traceback.print_exc(file=sys.stderr)
-            ran = False
-        if ran:
-            self._log_async("%s Stopped the adb server that was probably holding it." % why)
-
     def _loop_body(self, gen: int) -> None:
         """Background loop: find a phone, switch it to accessory mode, open the pipe, and keep it open
         until the cable comes out."""
@@ -618,8 +598,6 @@ class RelayEngine:
                 except Exception as e:
                     traceback.print_exc(file=sys.stderr)
                     r = usbaoa.SwitchResult(usbaoa.AOA_ERR_IO, 0, str(e))
-                if r.code == usbaoa.AOA_ERR_BUSY:
-                    self._release_adb("%s is busy." % target.name)
                 if r.code != usbaoa.AOA_OK:
                     publish(device, candidates, usbaoa.error_text(r.code, target.name, r.detail))
                     pause(self._usb_error_pause)
@@ -655,8 +633,6 @@ class RelayEngine:
                 except Exception as e:
                     traceback.print_exc(file=sys.stderr)
                     failure = usbaoa.UsbError(usbaoa.AOA_ERR_OPEN, str(e))
-                if failure.code == usbaoa.AOA_ERR_BUSY:
-                    self._release_adb("%s is busy." % target.name)
                 if failure.code in (usbaoa.AOA_ERR_PERMISSION, usbaoa.AOA_ERR_UNAVAILABLE):
                     publish(device, candidates, usbaoa.error_text(failure.code, target.name, failure.detail))
                     break   # retrying won't help
