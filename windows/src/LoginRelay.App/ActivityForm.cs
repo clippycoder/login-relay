@@ -16,6 +16,7 @@ namespace LoginRelay.App
         private readonly RelayEngine _engine;
         private readonly Action _downloadPlatformTools;
         private readonly Action _chooseAdb;
+        private readonly Action _openUsbSetup;
         private readonly Label _status = new Label();
         private readonly Label _detail = new Label();
         private readonly Button _primary = new Button();
@@ -25,11 +26,12 @@ namespace LoginRelay.App
         private Action? _secondaryAction;
         private string _shownLog = "";
 
-        public ActivityForm(RelayEngine engine, Icon appIcon, Action downloadPlatformTools, Action chooseAdb)
+        public ActivityForm(RelayEngine engine, Icon appIcon, Action downloadPlatformTools, Action chooseAdb, Action openUsbSetup)
         {
             _engine = engine;
             _downloadPlatformTools = downloadPlatformTools;
             _chooseAdb = chooseAdb;
+            _openUsbSetup = openUsbSetup;
 
             Text = "Login Relay";
             Icon = appIcon;
@@ -63,9 +65,9 @@ namespace LoginRelay.App
 
             _status.AutoSize = true;
             _status.Font = new Font(Font.FontFamily, 12f, FontStyle.Bold);
-            _status.MaximumSize = new Size(440, 0);
+            _status.MaximumSize = new Size(460, 0);
             _detail.AutoSize = true;
-            _detail.MaximumSize = new Size(440, 0);
+            _detail.MaximumSize = new Size(460, 0);
             _detail.ForeColor = SystemColors.GrayText;
             var titles = new FlowLayoutPanel();
             titles.AutoSize = true;
@@ -173,10 +175,14 @@ namespace LoginRelay.App
                     }
                     break;
                 case PhaseKind.Ready:
-                    Offer(_primary, "Open on Phone", _engine.OpenOnPhone, true);
-                    if (_engine.PhoneAppIsOutdated)
+                    // Opening and updating the phone app go through adb, so they're for the adb connection only.
+                    if (_engine.Transport == TransportKind.Adb)
                     {
-                        Offer(_secondary, "Update on Phone", _engine.InstallPhoneApp, false);
+                        Offer(_primary, "Open on Phone", _engine.OpenOnPhone, true);
+                        if (_engine.PhoneAppIsOutdated)
+                        {
+                            Offer(_secondary, "Update on Phone", _engine.InstallPhoneApp, false);
+                        }
                     }
                     break;
                 case PhaseKind.Working:
@@ -184,6 +190,10 @@ namespace LoginRelay.App
                     break;
                 default:
                     Offer(_primary, "Check Again", _engine.CheckAgain, true);
+                    if (_engine.Transport == TransportKind.Usb)
+                    {
+                        Offer(_secondary, "USB Driver Setup\u2026", _openUsbSetup, false);
+                    }
                     break;
             }
             _primary.Enabled = _engine.Busy == null;

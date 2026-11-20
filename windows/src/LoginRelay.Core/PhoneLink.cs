@@ -15,7 +15,7 @@ namespace LoginRelay.Core
     /// adb accepts the TCP connection even when nothing is listening on the phone, then closes it. So a
     /// connect only counts once it stays open for a moment (400 ms).
     /// </summary>
-    public sealed class PhoneLink
+    public sealed class PhoneLink : IPhoneConnection
     {
         public const int StayOpenMilliseconds = 400;
 
@@ -81,6 +81,12 @@ namespace LoginRelay.Core
             {
                 obj["text"] = text;
             }
+            SendFields(obj);
+        }
+
+        /// <summary>Sends a JSON object whose members are all strings, newline-terminated. Never throws.</summary>
+        public void SendFields(Dictionary<string, string> obj)
+        {
             byte[] data = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(obj) + "\n");
             lock (_lock)
             {

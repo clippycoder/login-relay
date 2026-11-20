@@ -51,6 +51,7 @@ namespace LoginRelay.App
         private readonly NotifyIcon _tray;
         private readonly ContextMenuStrip _menu = new ContextMenuStrip();
         private readonly ActivityForm _window;
+        private readonly UsbSetupForm _usbSetup;
         private readonly Icon _iconReady;
         private readonly Icon _iconOff;
         private readonly Icon _iconActive;
@@ -88,7 +89,9 @@ namespace LoginRelay.App
             _platform = new WindowsPlatform(_tray);
             _engine = new RelayEngine(_ui, _platform, _prefs);
             _engine.LogSink = Program.WriteLog;
-            _window = new ActivityForm(_engine, appIcon, ConfirmDownloadPlatformTools, ChooseAdb);
+            _engine.UsbDiagnostics = new WmiUsbDiagnostics();
+            _usbSetup = new UsbSetupForm(_engine, appIcon, _platform.OpenUrl);
+            _window = new ActivityForm(_engine, appIcon, ConfirmDownloadPlatformTools, ChooseAdb, () => _usbSetup.ShowWindow());
             _engine.Changed += OnEngineChanged;
 
             // A crash in the middle of a login can leave a return scheme claimed; undo that first.
@@ -158,6 +161,7 @@ namespace LoginRelay.App
         {
             UpdateIcon();
             _window.UpdateView();
+            _usbSetup.UpdateView();
         }
 
         private void UpdateIcon()
@@ -184,7 +188,7 @@ namespace LoginRelay.App
                 item.Dispose();
             }
 
-            (string status, string detail) = _engine.Describe();
+            (string status, string detail) = _engine.Describe(true);
             PhaseInfo phase = _engine.Phase;
             bool good = phase.Kind == PhaseKind.Ready || phase.Kind == PhaseKind.Working;
 
@@ -218,12 +222,16 @@ namespace LoginRelay.App
                         }
                         break;
                     case PhaseKind.Ready:
-                        AddItem("Open Login Relay on Phone", _engine.OpenOnPhone);
-                        if (_engine.PhoneAppIsOutdated && _engine.PhoneVersion != null && _engine.BundledPhoneVersion != null)
+                        // Opening and updating the phone app go through adb, so they're for the adb connection only.
+                        if (_engine.Transport == TransportKind.Adb)
                         {
-                            AddItem(
-                                "Update Login Relay on Phone (" + _engine.PhoneVersion + " → " + _engine.BundledPhoneVersion + ")",
-                                _engine.InstallPhoneApp);
+                            AddItem("Open Login Relay on Phone", _engine.OpenOnPhone);
+                            if (_engine.PhoneAppIsOutdated && _engine.PhoneVersion != null && _engine.BundledPhoneVersion != null)
+                            {
+                                AddItem(
+                                    "Update Login Relay on Phone (" + _engine.PhoneVersion + " → " + _engine.BundledPhoneVersion + ")",
+                                    _engine.InstallPhoneApp);
+                            }
                         }
                         break;
                     case PhaseKind.Working:
@@ -234,6 +242,20 @@ namespace LoginRelay.App
                         AddItem("Check Again", _engine.CheckAgain);
                         break;
                 }
+            }
+
+            if (_engine.Transport == TransportKind.Usb && _engine.UsbCandidates.Count > 1)
+            {
+                var usbParent = new ToolStripMenuItem("Phone");
+                foreach (UsbDevice candidate in _engine.UsbCandidates)
+                {
+                    string id = candidate.Id;
+                    var entry = new ToolStripMenuItem(candidate.Name.Length == 0 ? id : candidate.Name + " (" + id + ")");
+                    entry.Checked = _engine.Phone != null && _engine.Phone.Serial == "usb:" + id;
+                    entry.Click += (sender, args) => SafeRun(() => _engine.SelectUsb(id));
+                    usbParent.DropDownItems.Add(entry);
+                }
+                _menu.Items.Add(usbParent);
             }
 
             List<Device> usable = _engine.Devices.Where(d => d.IsUsable).ToList();
@@ -253,6 +275,25 @@ namespace LoginRelay.App
             if (_menu.Items.Count > 0 && !(_menu.Items[_menu.Items.Count - 1] is ToolStripSeparator))
             {
                 _menu.Items.Add(new ToolStripSeparator());
+            }
+
+            var connectParent = new ToolStripMenuItem("Connect Over");
+            foreach (KeyValuePair<TransportKind, string> choice in new[]
+            {
+                new KeyValuePair<TransportKind, string>(TransportKind.Adb, "adb (needs USB debugging)"),
+                new KeyValuePair<TransportKind, string>(TransportKind.Usb, "USB accessory (no USB debugging) — beta"),
+            })
+            {
+                TransportKind kind = choice.Key;
+                var entry = new ToolStripMenuItem(choice.Value);
+                entry.Checked = _engine.Transport == kind;
+                entry.Click += (sender, args) => SafeRun(() => _engine.SetTransport(kind));
+                connectParent.DropDownItems.Add(entry);
+            }
+            _menu.Items.Add(connectParent);
+            if (_engine.Transport == TransportKind.Usb)
+            {
+                AddItem(UsbSetupText.SetupMenuName, () => _usbSetup.ShowWindow());
             }
 
             AddItem("Show Activity…", () => _window.ShowWindow());

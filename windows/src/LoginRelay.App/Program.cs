@@ -13,6 +13,7 @@
 //   LOGINRELAY_ADB=<path>      use exactly this adb (may be a .cmd wrapper)
 //   LOGINRELAY_BROWSER=none    don't open the sign-in page in a browser
 //   LOGINRELAY_LOG=<file>      append every activity-log line to this file
+//   LOGINRELAY_TRANSPORT=adb|usb   pin the connection type, overriding the saved choice
 using System;
 using System.IO;
 using System.IO.Pipes;

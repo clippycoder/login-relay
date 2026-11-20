@@ -12,6 +12,12 @@ namespace LoginRelay.Core
         public string? SelectedSerial { get; set; }
         public bool Notifications { get; set; }
         public bool HasLaunchedBefore { get; set; }
+
+        /// <summary>"adb" (the default) or "usb".</summary>
+        public string? Transport { get; set; }
+
+        /// <summary>Which USB phone to use when several are plugged in (a port location such as "1-4.2").</summary>
+        public string? UsbSelected { get; set; }
     }
 
     /// <summary>
@@ -66,6 +72,56 @@ namespace LoginRelay.Core
         {
             get { lock (_lock) { return _data.HasLaunchedBefore; } }
             set { lock (_lock) { _data.HasLaunchedBefore = value; Save(); } }
+        }
+
+        /// <summary>
+        /// How the computer reaches the phone. Test hook: LOGINRELAY_TRANSPORT=adb|usb overrides the saved
+        /// choice (the end-to-end tests use adb).
+        /// </summary>
+        public TransportKind Transport
+        {
+            get
+            {
+                string? forced = Environment.GetEnvironmentVariable("LOGINRELAY_TRANSPORT");
+                TransportKind? fromEnv = Parse(forced);
+                if (fromEnv.HasValue)
+                {
+                    return fromEnv.Value;
+                }
+                lock (_lock)
+                {
+                    return Parse(_data.Transport) ?? TransportKind.Adb;
+                }
+            }
+            set
+            {
+                lock (_lock)
+                {
+                    _data.Transport = value == TransportKind.Usb ? "usb" : "adb";
+                    Save();
+                }
+            }
+        }
+
+        private static TransportKind? Parse(string? text)
+        {
+            string t = (text ?? "").Trim().ToLowerInvariant();
+            if (t == "adb")
+            {
+                return TransportKind.Adb;
+            }
+            if (t == "usb")
+            {
+                return TransportKind.Usb;
+            }
+            return null;
+        }
+
+        /// <summary>Which USB phone to use when several are plugged in (its port location).</summary>
+        public string? UsbSelected
+        {
+            get { lock (_lock) { return _data.UsbSelected; } }
+            set { lock (_lock) { _data.UsbSelected = value; Save(); } }
         }
 
         private PrefsData Load()

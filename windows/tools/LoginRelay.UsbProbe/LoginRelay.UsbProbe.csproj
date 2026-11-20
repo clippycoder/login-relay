@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A test rig for the USB accessory layer: run it on a real PC with a phone. Not part of the app. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>LoginRelay.UsbProbe</AssemblyName>
+    <RootNamespace>LoginRelay.UsbProbe</RootNamespace>
+    <Version>0.5.0</Version>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <!-- System.Management is Windows-only; this tool only makes sense there. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <!-- One self-contained exe, like the app. libusb-1.0.dll goes next to it. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LoginRelay.Core\LoginRelay.Core.csproj" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The same WMI code the app uses for its driver guide. -->
+    <Compile Include="..\..\src\LoginRelay.App\WmiUsbDiagnostics.cs" Link="WmiUsbDiagnostics.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\libs\libusb-1.0.dll" Condition="Exists('..\..\libs\libusb-1.0.dll')" Link="libusb-1.0.dll"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+</Project>

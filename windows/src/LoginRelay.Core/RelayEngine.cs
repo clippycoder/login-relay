@@ -26,6 +26,9 @@ namespace LoginRelay.Core
         NoPhone,
         Unauthorized,
         NeedsApp,
+
+        /// <summary>USB mode: a phone is plugged in but Login Relay on it isn't answering yet.</summary>
+        Connecting,
         Ready,
         Working,
     }
@@ -37,11 +40,15 @@ namespace LoginRelay.Core
         public Device? Phone { get; }
         public Flow? Flow { get; }
 
-        public PhaseInfo(PhaseKind kind, Device? phone = null, Flow? flow = null)
+        /// <summary>For <see cref="PhaseKind.Connecting"/>: what we're waiting for.</summary>
+        public string Detail { get; }
+
+        public PhaseInfo(PhaseKind kind, Device? phone = null, Flow? flow = null, string detail = "")
         {
             Kind = kind;
             Phone = phone;
             Flow = flow;
+            Detail = detail;
         }
     }
 
@@ -50,12 +57,12 @@ namespace LoginRelay.Core
     {
         public RelayRequest Request { get; }
         public Device Phone { get; }
-        public PhoneLink Link { get; }
+        public IPhoneConnection Link { get; }
         public IClaim? Claim { get; set; }
         public Timer? TimeoutTimer { get; set; }
         public IPromptHandle? Prompt { get; set; }
 
-        public Flow(RelayRequest request, Device phone, PhoneLink link)
+        public Flow(RelayRequest request, Device phone, IPhoneConnection link)
         {
             Request = request;
             Phone = phone;
@@ -70,7 +77,7 @@ namespace LoginRelay.Core
     /// All state lives on the UI thread (reached through <see cref="IUiDispatcher"/>); the public members
     /// below must be called there. One background thread polls adb and owns the link.
     /// </summary>
-    public sealed class RelayEngine
+    public sealed partial class RelayEngine
     {
         public const string PhonePackage = "io.github.clippycoder.oauthrelay";
 
@@ -128,6 +135,10 @@ namespace LoginRelay.Core
         {
             get
             {
+                if (Transport == TransportKind.Usb)
+                {
+                    return UsbPhaseInfo();
+                }
                 if (AdbTool == null)
                 {
                     return new PhaseInfo(PhaseKind.NoAdb);
@@ -186,7 +197,7 @@ namespace LoginRelay.Core
         private bool _forceCheck;                   // guarded by _stateLock
         private readonly object _stateLock = new object();
         private readonly AutoResetEvent _wake = new AutoResetEvent(false);
-        private PhoneLink? _currentLink;            // UI thread
+        private IPhoneConnection? _currentLink;     // UI thread
         private Timer? _watchdog;
         private readonly List<Timer> _delays = new List<Timer>();
         private readonly object _timerLock = new object();
@@ -227,7 +238,18 @@ namespace LoginRelay.Core
         {
             int gen = Interlocked.Increment(ref _generation);
             Tick();
-            var thread = new Thread(() => Loop(gen));
+            bool usb = _prefs.Transport == TransportKind.Usb;
+            var thread = new Thread(() =>
+            {
+                if (usb)
+                {
+                    UsbLoop(gen);
+                }
+                else
+                {
+                    Loop(gen);
+                }
+            });
             thread.IsBackground = true;
             thread.Name = "relay-loop";
             thread.Start();
@@ -242,6 +264,7 @@ namespace LoginRelay.Core
                 _currentLink.Close();
             }
             _wake.Set();
+            ShutdownUsb();
             Timer? watchdog = _watchdog;
             _watchdog = null;
             if (watchdog != null)
@@ -459,6 +482,12 @@ namespace LoginRelay.Core
                         };
                         if (link.Open(port.Value))
                         {
+                            if (_stopping || gen != Volatile.Read(ref _generation))
+                            {
+                                // The connection type changed while we were connecting.
+                                link.Close();
+                                continue;
+                            }
                             _ui.Post(() => LinkOpened(link));
                             // adb can hold a connection open without it reaching the phone (for instance
                             // while a replugged phone is still reconnecting), so keep checking that the
@@ -555,7 +584,7 @@ namespace LoginRelay.Core
             }
         }
 
-        private void LinkOpened(PhoneLink link)
+        private void LinkOpened(IPhoneConnection link)
         {
             if (_stopping)
             {
@@ -563,16 +592,22 @@ namespace LoginRelay.Core
             }
             _currentLink = link;
             Linked = true;
-            Log("Linked to Login Relay on the phone.");
+            Log(link is UsbPhoneLink ? "USB connection open." : "Linked to Login Relay on the phone.");
             RaiseChanged();
         }
 
-        private void LinkClosed(PhoneLink link)
+        private void LinkClosed(IPhoneConnection link)
         {
             if (ReferenceEquals(_currentLink, link))
             {
                 _currentLink = null;
                 Linked = false;
+                if (link is UsbPhoneLink)
+                {
+                    UsbAlive = false;
+                    _usbEverAlive = false;
+                    PhoneVersion = null;
+                }
                 if (!_stopping)
                 {
                     Log("Link to the phone closed.");
@@ -599,7 +634,7 @@ namespace LoginRelay.Core
         }
 
         /// <summary>Runs on the link's read thread; everything real happens on the UI thread.</summary>
-        private void HandleMessage(JsonElement msg, PhoneLink link, Device phone)
+        private void HandleMessage(JsonElement msg, IPhoneConnection link, Device phone)
         {
             string? type = StringProperty(msg, "type");
             if (type == "open")
@@ -622,12 +657,34 @@ namespace LoginRelay.Core
                     }
                 });
             }
-            // Unknown messages are ignored.
+            else if (type == "hello")
+            {
+                string? version = StringProperty(msg, "version");
+                string? transport = StringProperty(msg, "transport");
+                _ui.Post(() =>
+                {
+                    if (phone.IsUsb)
+                    {
+                        PhoneVersion = version;
+                    }
+                    Log("Login Relay " + (version ?? "?") + " on the phone says hello (" + (transport ?? "?") + ").");
+                });
+            }
+            else if (type == "delivered")
+            {
+                _ui.Post(DeliveryConfirmed);
+            }
+            else if (type == "error")
+            {
+                string text = StringProperty(msg, "text") ?? "unknown error";
+                _ui.Post(() => PhoneReportedError(text));
+            }
+            // "pong" and unknown messages are ignored (any message counts as the phone being alive).
         }
 
         // ---- one login ----------------------------------------------------------------------------
 
-        private void Begin(RelayRequest request, PhoneLink link, Device phone)
+        private void Begin(RelayRequest request, IPhoneConnection link, Device phone)
         {
             if (_stopping)
             {
@@ -803,6 +860,12 @@ namespace LoginRelay.Core
             }
             Log("Returning to " + flow.Request.AppName + " on the phone…");
             RaiseChanged();
+            if (flow.Phone.IsUsb)
+            {
+                // No adb here: the phone checks the result itself and hands it to the app.
+                SendCallbackOverUsb(flow, callback);
+                return;
+            }
             IAdb? adb = AdbTool;
             if (adb == null)
             {
@@ -1022,7 +1085,7 @@ namespace LoginRelay.Core
         // ---- wording shared by the window and the menu (word for word from the macOS app) ---------
 
         /// <summary>Headline and one line of explanation for the current phase.</summary>
-        public (string Status, string Detail) Describe()
+        public (string Status, string Detail) Describe(bool brief = false)
         {
             if (Busy != null)
             {
@@ -1034,7 +1097,13 @@ namespace LoginRelay.Core
                 case PhaseKind.NoAdb:
                     return ("adb not found", "Login Relay talks to the phone through adb, part of Android platform-tools.");
                 case PhaseKind.NoPhone:
+                    if (Transport == TransportKind.Usb)
+                    {
+                        return DescribeUsbNoPhone(brief);
+                    }
                     return ("No phone connected", "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).");
+                case PhaseKind.Connecting:
+                    return DescribeUsbConnecting(phase, brief);
                 case PhaseKind.Unauthorized:
                 {
                     Device d = phase.Phone!;
@@ -1053,7 +1122,7 @@ namespace LoginRelay.Core
                 case PhaseKind.Ready:
                 {
                     Device d = phase.Phone!;
-                    string outdated = PhoneAppIsOutdated ? " An update for the phone app is available." : "";
+                    string outdated = Transport == TransportKind.Adb && PhoneAppIsOutdated ? " An update for the phone app is available." : "";
                     return (d.Title + " is ready", "Sign in to an app on the phone and the page opens here." + outdated);
                 }
                 default:

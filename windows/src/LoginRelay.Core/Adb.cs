@@ -20,6 +20,12 @@ namespace LoginRelay.Core
         {
             get { return Model.Length == 0 ? Serial : Model.Replace('_', ' '); }
         }
+
+        /// <summary>A phone found over USB accessory mode rather than adb (its serial is "usb:" + port location).</summary>
+        public bool IsUsb
+        {
+            get { return Serial.StartsWith("usb:", StringComparison.Ordinal); }
+        }
     }
 
     public sealed record ProcessResult(int Status, string Out, string Err)

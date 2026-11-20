@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LoginRelay.App", "src\Login
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LoginRelay.Core.Tests", "tests\LoginRelay.Core.Tests\LoginRelay.Core.Tests.csproj", "{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1003}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LoginRelay.UsbProbe", "tools\LoginRelay.UsbProbe\LoginRelay.UsbProbe.csproj", "{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1004}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,5 +32,9 @@ Global
 		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1003}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1003}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1003}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1004}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1004}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1004}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6B1F5C2A-3D4E-4F70-9A11-0C2D7E5A1004}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
