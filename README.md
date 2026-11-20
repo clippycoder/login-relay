@@ -122,8 +122,9 @@ Links that aren't sign-ins, such as a "terms of service" link, also open on the 
 | Linux | same phone, from the Linux USB code run on a Mac: the phone switches to accessory mode and answers, with USB debugging on and off | built and tested in CI on a real Linux machine under a virtual display against a fake phone; **not yet run on a Linux desktop with a real phone** |
 | Windows | – | built and tested in CI on a real Windows machine against a fake phone; **not yet run with a real phone** |
 
-Tested with the phone in "File transfer" USB mode. A phone whose default USB mode is "Charging only" may
-not show up until you choose File transfer; that hasn't been tried. Not verified anywhere: *Launch at
+Tested with the phone in "File transfer" USB mode. A phone left in "No data transfer" / "Charging only" mode
+may not show up until you choose File transfer; that couldn't be tried, because the one test phone switches
+itself back to File transfer. Not verified anywhere: *Launch at
 Login* and notifications. Reports and fixes are welcome.
 
 ## How it stays safe

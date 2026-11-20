@@ -183,7 +183,7 @@ neither arrives within 10 s. The phone closes its screen itself after delivering
 
 **Verified** on a CAT S22 Flip (Android 11) with USB debugging off and the phone in "File transfer" mode: it
 enumerates by itself (`18D1:4EE1`), the switch works, and it comes back as `18D1:2D00`. **Not verified:** a phone
-whose default USB mode is "Charging only", which may not enumerate until the user picks "File transfer" in its USB
+in "No data transfer" / "Charging only" mode (the test phone switches itself back to File transfer), which may not enumerate until the user picks "File transfer" in its USB
 notification (the apps say so in the "no phone found" hint). An MDM that disables USB data (for example
 `setUsbDataSignalingEnabled(false)`) will block this mode.
 
