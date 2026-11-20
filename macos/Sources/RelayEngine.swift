@@ -48,6 +48,9 @@ final class RelayEngine {
     private(set) var usbCandidates: [UsbDevice] = []
     private(set) var usbDetail = ""
     private(set) var usbAlive = false
+    /// Login Relay on the phone has answered at least once on this connection. Android reclaims an idle app
+    /// process on a small phone, which silences it; that's normal, and the next sign-in starts it again by itself.
+    private var usbEverAlive = false
     private var awaitingDelivery: Flow?
     private var deliveryTimer: Timer?
 
@@ -71,7 +74,7 @@ final class RelayEngine {
     private var usbPhase: Phase {
         guard let device else { return .noPhone }
         if let active { return .working(active) }
-        if usbAlive { return .ready(device) }
+        if usbAlive || usbEverAlive { return .ready(device) }
         return .connecting(device, usbDetail)
     }
 
@@ -301,7 +304,7 @@ final class RelayEngine {
         if currentLink === link {
             currentLink = nil
             linked = false
-            if link is UsbPhoneLink { usbAlive = false; phoneVersion = nil }
+            if link is UsbPhoneLink { usbAlive = false; usbEverAlive = false; phoneVersion = nil }
             log("Link to the phone closed.")
         }
         if active?.link === link { cancelActive("The phone closed Login Relay.", notifyPhone: false) }
@@ -583,7 +586,9 @@ final class RelayEngine {
     private func usbAliveChanged(_ alive: Bool, link: PhoneConnection) {
         guard currentLink === link, usbAlive != alive else { return }
         usbAlive = alive
-        log(alive ? "Login Relay on the phone is answering." : "Login Relay on the phone stopped answering.")
+        if alive { usbEverAlive = true }
+        log(alive ? "Login Relay on the phone is answering."
+                  : "Login Relay on the phone went idle (it starts again by itself when an app asks to sign in).")
         if !alive {
             phoneVersion = nil
             if active != nil { cancelActive("Login Relay on the phone stopped answering.", notifyPhone: false) }
@@ -685,7 +690,7 @@ final class RelayEngine {
                 DispatchQueue.main.async { if let link { self?.linkClosed(link) } }
                 closed.signal()
             }
-            publish(device, candidates, "Waiting for Login Relay on the phone. If it asks to allow USB access, tap OK.")
+            publish(device, candidates, "Login Relay on the phone isn't answering yet. If Android asks to allow USB access, tap OK; otherwise just start a sign-in on the phone and Login Relay starts by itself.")
             DispatchQueue.main.async { self.linkOpened(link) }
             link.start()
             while closed.wait(timeout: .now() + 1) == .timedOut {

@@ -153,7 +153,9 @@ final class ActivityWindowController: NSWindowController {
             }
             return ("No phone connected", "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).")
         case .connecting(let d, let detail):
-            return ("Connecting to \(d.title)…", detail.isEmpty ? "Waiting for the phone." : detail)
+            // Once the USB pipe is open the phone is plugged in and connected; it's just not answering yet.
+            return (engine.linked ? "\(d.title) is connected over USB" : "Connecting to \(d.title)…",
+                    detail.isEmpty ? "Waiting for the phone." : detail)
         case .unauthorized(let d):
             if d.state == "unauthorized" {
                 return ("\(d.title) is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt.")
