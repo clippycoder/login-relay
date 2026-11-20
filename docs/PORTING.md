@@ -149,6 +149,76 @@ archive for this OS (`darwin`/`win`/`linux` in the file name) and its `sha1`, do
 `https://dl.google.com/android/repository/<file>`, **refuse it if the SHA-1 differs**, unpack into the
 app's own data folder.
 
+## USB accessory mode (optional second transport)
+
+adb needs Developer options and USB debugging, which filtered or managed phones often can't or shouldn't
+have. USB accessory mode (Android Open Accessory, "AOA", the protocol Android Auto uses) needs neither.
+The macOS app has it (`Usb.swift`, `UsbFraming.swift`, `aoa_mac.c`, and `usbLoop` in `RelayEngine.swift`);
+the Linux app is next. **Windows has none**: the switch and the pipe both need a driver (WinUSB) bound to
+the phone and to the accessory interface, which takes an administrator step the app can't do.
+
+The phone app (0.4.0+) registers for `USB_ACCESSORY_ATTACHED` with a filter for manufacturer
+"Login Relay" and model "Desktop", needs no permission, and Android asks the user once.
+
+**Switching** (all control transfers on endpoint 0 of the phone):
+
+| step | bmRequestType | bRequest | other |
+|---|---|---|---|
+| get protocol | 0xC0 | 51 | 2 bytes in, little-endian; must be >= 1 |
+| send string | 0x40 | 52 | wIndex 0..5, data = the string + NUL |
+| start | 0x40 | 53 | the phone then drops off the bus; an error here is expected |
+
+Strings: 0 manufacturer `Login Relay`, 1 model `Desktop` (these two must match the phone's filter exactly),
+2 description = the computer's name (shown on the phone), 3 version `1`, 4 URI
+`https://github.com/clippycoder/login-relay`, 5 serial = the location id.
+
+The phone reappears as Google VID `0x18D1`, PID `0x2D00..0x2D05` (`2D01` = accessory + adb) at the same
+bus location. Android gives up if the host hasn't reconnected in 10 s, so poll for ~12 s. Interface 0 has one
+bulk IN and one bulk OUT endpoint; claim only that one (with `2D01` interface 1 is adb). Open the interface
+**directly, not the whole device**: an adb server usually holds a phone exclusively (macOS reports
+`kIOReturnExclusiveAccess`, 0xe00002c5, on the *switch*); the macOS app stops the adb server in that case,
+which restarts when needed.
+
+**Candidates.** Only ask a device about AOA if it exposes an interface with class/subclass/protocol
+`06/01/*` (PTP/MTP), `FF/42/01` (adb) or `FF/FF/00` (vendor MTP), or is already in accessory mode. Never
+probe anything else: an unrelated Qualcomm download-mode device was on the bus during testing and must be
+left alone. One candidate is used automatically; with several the user picks (`usbSelected`). Rate-limit
+switch attempts (one per 20 s per location; forget a location when it leaves the bus).
+
+**Framing.** Same line-delimited JSON as adb. Reads use a buffer of at least 16384 bytes (a partial read
+drops the rest of the transfer); writes are chunked to at most 16384. A bulk transfer whose length is an
+exact multiple of the packet size ends without a short packet and the other side's read never completes, so
+after the `\n` append **one more `\n` if the length is a multiple of 64** (512 and 1024 are multiples of it);
+readers skip blank lines. Lines over 1 MiB mean the stream is broken. See `UsbFraming.swift`.
+
+**Liveness.** Bulk USB has no "connection closed". The computer sends `{"type":"ping"}` every 2 s; the link
+is *alive* if any message arrived in the last 8 s. Phase is `connecting(device, detail)` until alive, then
+`ready`; if it stops being alive mid-login, cancel the login. The phone's USB link outlives its screen (the
+accessory file can't be reopened while a read is blocked in the kernel) and answers pings itself, so an alive
+link means the phone app's process is running, not that a sign-in is on screen.
+
+**Messages added for USB.**
+
+| direction | message |
+|---|---|
+| phone → computer | `{"v":1,"type":"hello","transport":"usb"\|"adb","version":"<app version>"}` on every new link |
+| phone → computer | `{"type":"pong"}`, `{"type":"delivered"}`, `{"type":"error","text":…}` |
+| computer → phone | `{"type":"ping"}`, `{"type":"callback","url":…}` |
+
+**Delivery without adb.** In USB mode the computer does **not** run `am start`; it sends `callback`. The phone
+checks it against the page it opened (same redirect address and, if present, same `state`; the rules in
+`android/.../Redirect.java`, tested against `tests/vectors.json`), then calls `startActivity(VIEW, url)` with
+`setPackage(<caller>)` from its foreground screen. It answers `delivered`, or `error` with a reason
+("That result is from a different sign-in.", "That isn't this sign-in's return address.", "The app didn't
+accept the result."). The computer logs `Done: <app> is finishing the <verb>.` on `delivered`, logs
+`The phone says: <text>` on `error`, and logs `The phone didn't confirm it handed the result to the app.` if
+neither arrives within 10 s. The phone closes its screen itself after delivering.
+
+**Not yet verified:** a phone with USB debugging **off**, in its default USB mode. Such a phone may not
+enumerate on the bus at all until the user picks "File transfer" in its USB notification (the gadget is pulled
+down in "Charging" mode); the apps say so in the "no phone found" hint. An MDM that disables USB data (for
+example `setUsbDataSignalingEnabled(false)`) will block this mode.
+
 ## Interface
 
 - **Tray / menu bar icon**: three states: ready, off (no phone ready; dimmed), active (a login is in

@@ -64,6 +64,24 @@ developer account behind it), so macOS blocks the first launch: right-click the 
 or open System Settings → Privacy & Security and choose **Open Anyway**, or clear the flag once with
 `xattr -dr com.apple.quarantine "/Applications/Login Relay.app"`.
 
+### USB accessory mode (beta): no USB debugging
+
+By default Login Relay talks to the phone through adb, which needs USB debugging. In the Mac app's menu
+choose **Connect Over → USB accessory** and it uses Android's USB accessory mode (the protocol Android Auto
+uses) instead: no Developer options, no USB debugging, and the phone app still asks for no permissions. The
+first time, Android asks whether to let Login Relay use the accessory; tap OK (tick "Use by default" to skip
+it next time). If the Mac says "No phone found over USB", pick "File transfer" in the phone's USB
+notification.
+
+In this mode the phone checks the sign-in result itself (same return address, same `state`) before handing it
+to the app, so nothing needs adb at all.
+
+Status: sign-in and sign-out work on one phone (a CAT S22 Flip, Android 11) that **also had USB debugging
+on**. **Not yet tested with USB debugging off**, where the phone may not appear on the cable until you pick
+"File transfer". An adb server holds a phone exclusively and blocks the switch, so the Mac app stops the adb
+server when it hits that (it restarts when needed). macOS only so far; the Linux app is next. There is no
+Windows version, because it would need a driver installed for the phone.
+
 ### Windows
 
 Unzip and run `LoginRelay.exe` (keep `login-relay.apk` next to it). It isn't code-signed, so SmartScreen
@@ -121,6 +139,8 @@ fixes are welcome.
 - **Nothing left behind on the computer.** The URL handler is registered for one login and then
   removed. If another app already handled that scheme, it is restored; a claim left by a crash is
   cleaned up on the next launch.
+- **The phone vets results in USB mode.** The phone only hands an app a result that matches the page it opened
+  (same return address and `state`), so nothing else on the cable can feed an app a login result.
 - **Only web links are opened in the browser.** A `file:` or custom-scheme address supplied by the phone
   is refused, so it can't launch an arbitrary program on the computer.
 
@@ -206,6 +226,9 @@ JSON:
 | phone → computer | `{"v":1,"type":"open","url":…,"referrer":"android-app://<package>","label":"<app name>"}` (`label` since 0.3.0) |
 | phone → computer | `{"type":"cancel"}` |
 | computer → phone | `{"type":"status","text":…}`, `{"type":"error","text":…}`, `{"type":"done"}` |
+
+USB accessory mode adds `hello`, `ping`/`pong`, `callback` and `delivered`; see
+[docs/PORTING.md](docs/PORTING.md#usb-accessory-mode-optional-second-transport).
 
 The return address goes back with `adb shell am start -a android.intent.action.VIEW -d <url> -p <package>`.
 
