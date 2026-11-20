@@ -560,6 +560,7 @@ final class RelayEngine {
         guard t != Prefs.transport else { return }
         cancelActive("Switching connection type.", notifyPhone: true)
         currentLink?.close()
+        currentLink = nil   // its late close notice then changes nothing (it would clear the adb check's phoneVersion)
         Prefs.transport = t
         adb = nil; devices = []; device = nil; phoneVersion = nil; linked = false
         usbCandidates = []; usbAlive = false; usbDetail = ""
