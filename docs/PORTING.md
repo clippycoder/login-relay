@@ -153,9 +153,10 @@ app's own data folder.
 
 adb needs Developer options and USB debugging, which filtered or managed phones often can't or shouldn't
 have. USB accessory mode (Android Open Accessory, "AOA", the protocol Android Auto uses) needs neither.
-The macOS app has it (`Usb.swift`, `UsbFraming.swift`, `aoa_mac.c`, and `usbLoop` in `RelayEngine.swift`);
-the Linux app is next. **Windows has none**: the switch and the pipe both need a driver (WinUSB) bound to
-the phone and to the accessory interface, which takes an administrator step the app can't do.
+The macOS app has it (`Usb.swift`, `UsbFraming.swift`, `aoa_mac.c`, and `usbLoop` in `RelayEngine.swift`),
+and so does the Linux app (`usbaoa.py`, `usblink.py`, `usbframing.py`, over pyusb). **Windows** needs a
+driver (WinUSB, installed once with Zadig) bound to the phone and to the accessory interface: libusb can only
+open devices bound to WinUSB, and the stock Windows drivers for a phone expose no way to send the switch.
 
 The phone app (0.4.0+) registers for `USB_ACCESSORY_ATTACHED` with a filter for manufacturer
 "Login Relay" and model "Desktop", needs no permission, and Android asks the user once.

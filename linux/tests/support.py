@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Shared test plumbing: the real tests/e2e fake adb and fake phone, run as subprocesses."""
+import gc
 import json
 import os
 import shutil
@@ -21,6 +22,25 @@ def open_fds():
         if os.path.isdir(d):
             return len(os.listdir(d))
     raise RuntimeError("no way to count file descriptors here")
+
+
+def stable_fds(samples=5, gap=0.1):
+    """The median of several descriptor counts taken a moment apart (after a garbage collection), so
+    that a descriptor the interpreter or a finishing thread holds for an instant doesn't count."""
+    gc.collect()
+    counts = []
+    for i in range(samples):
+        counts.append(open_fds())
+        if i < samples - 1:
+            time.sleep(gap)
+    return sorted(counts)[len(counts) // 2]
+
+
+def assert_fds_flat(case, before, slack=3):
+    """`before` came from stable_fds(). A real leak (one or more descriptors per poll or per call) adds
+    tens over these tests, so a small fixed slack still catches it."""
+    now = stable_fds()
+    case.assertLessEqual(now, before + slack, "file descriptors went from %d to %d" % (before, now))
 
 
 def wait_until(cond, timeout=15, what="condition", interval=0.05):

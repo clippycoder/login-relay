@@ -43,7 +43,7 @@ from . import engine as eng  # noqa: E402
 from .prefs import Prefs, find_share_file, share_dirs  # noqa: E402
 
 COMMENTS = ("Finishes browser sign-ins for Android phones that have no browser, using this computer's "
-            "browser over adb.\n\nGPL-3.0-or-later")
+            "browser over adb or a plain USB connection.\n\nGPL-3.0-or-later")
 
 
 # ---- small helpers ---------------------------------------------------------------------------
@@ -250,6 +250,15 @@ class ActivityWindow:
         self._actions = [None, None]
         outer.pack_start(buttons, False, False, 0)
 
+        # "Connect over" (adb or USB accessory) and, in USB mode with several phones, "Phone".
+        self._choosers = {}
+        self._entries = {}
+        self._updating = False
+        choosers = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._add_chooser(choosers, "transport", "Connect over:")
+        self._add_chooser(choosers, "usbphone", "Phone:")
+        outer.pack_start(choosers, False, False, 0)
+
         title = Gtk.Label()
         title.set_xalign(0)
         title.set_markup("<small><b>Activity</b></small>")
@@ -270,6 +279,44 @@ class ActivityWindow:
         scroll.set_min_content_height(180)
         scroll.add(self.view)
         outer.pack_start(scroll, True, True, 0)
+
+    def _add_chooser(self, parent, key: str, caption: str) -> None:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        label = Gtk.Label(label=caption)
+        combo = Gtk.ComboBoxText()
+        box.pack_start(label, False, False, 0)
+        box.pack_start(combo, False, False, 0)
+        label.show()
+        combo.show()
+        box.set_no_show_all(True)   # shown only when the engine offers choices (see _fill_chooser)
+        combo.connect("changed", self._chooser_changed, key)
+        parent.pack_start(box, False, False, 0)
+        self._choosers[key] = (box, combo, [])
+
+    def _fill_chooser(self, key: str, entries) -> None:
+        """Shows `entries` (MenuEntry toggles from the engine) in the drop-down, or hides it if empty."""
+        box, combo, current = self._choosers[key]
+        signature = [(e.label, e.action, e.arg) for e in entries]
+        self._updating = True
+        try:
+            if signature != current:
+                combo.remove_all()
+                for e in entries:
+                    combo.append_text(e.label)
+                self._choosers[key] = (box, combo, signature)
+            combo.set_active(next((i for i, e in enumerate(entries) if e.checked), -1))
+            self._entries[key] = list(entries)
+            box.set_visible(bool(entries))
+        finally:
+            self._updating = False
+
+    def _chooser_changed(self, combo, key: str) -> None:
+        if self._updating:
+            return
+        i = combo.get_active()
+        entries = self._entries.get(key, [])
+        if 0 <= i < len(entries) and not entries[i].checked:
+            self.app.run_action(entries[i].action, entries[i].arg)
 
     def set_note(self, text: str) -> None:
         self.note.set_text(text)
@@ -304,6 +351,8 @@ class ActivityWindow:
             if spec:
                 button.set_label(spec[0])
             button.set_sensitive(enabled if i == 0 else True)
+        self._fill_chooser("transport", eng.transport_choices(engine))
+        self._fill_chooser("usbphone", eng.usb_phone_choices(engine))
         if self.win.get_visible():
             text = "\n".join("%s  %s" % (ts.strftime("%H:%M:%S"), t) for ts, t in engine.log_lines)
             self.buffer.set_text(text)
@@ -543,6 +592,10 @@ class LoginRelayApp(Gtk.Application):
             self.quit()
         elif action == eng.A_SELECT_PHONE:
             e.select_device(arg)
+        elif action == eng.A_SELECT_USB:
+            e.select_usb(arg)
+        elif action == eng.A_SET_TRANSPORT:
+            e.set_transport(arg)
 
     def confirm_download_platform_tools(self) -> None:
         dlg = _message_dialog(Gtk.MessageType.QUESTION, "Download Android platform-tools?",

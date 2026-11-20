@@ -11,7 +11,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import SCHEME, PACKAGE, FakeWorld, authorize_url, open_fds, wait_until  # noqa: E402
+from support import SCHEME, PACKAGE, FakeWorld, authorize_url, stable_fds, assert_fds_flat, wait_until  # noqa: E402
 
 from loginrelay import engine as eng  # noqa: E402
 from loginrelay.prefs import Prefs  # noqa: E402
@@ -423,7 +423,7 @@ class PhaseTests(EngineCase):
         menu = eng.menu_model(self.engine, launch_at_login=True)
         self.assertEqual([e.label for e in menu],
                          ["Fake Phone is ready", "", "Open Login Relay on Phone",
-                          "Update Login Relay on Phone (0.2.2 → 0.3.0)", "", "Show Activity…", "",
+                          "Update Login Relay on Phone (0.2.2 → 0.3.0)", "", "Connect Over", "Show Activity…", "",
                           "Launch at Login", "Notify When a Sign-in Arrives", "", "About Login Relay",
                           "Quit Login Relay"])
         self.assertTrue(menu[0].good)
@@ -486,22 +486,22 @@ class RobustnessTests(EngineCase):
         self.wait_phase(eng.READY)
         wait_until(lambda: self.engine.linked, 10, "the link")
         time.sleep(1.5)                    # warm-up
-        before = open_fds()
+        before = stable_fds()
         calls_before = len(self.world.lines("adb_calls.jsonl"))
         time.sleep(7)
         calls = len(self.world.lines("adb_calls.jsonl")) - calls_before
         self.assertGreater(calls, 5, "the loop should have been polling")
         self.assertTrue(self.engine.linked)
-        self.assertLessEqual(open_fds(), before + 1)
+        assert_fds_flat(self, before)
 
     def test_polling_without_a_phone_does_not_leak_either(self):
         self.world.write("devices.txt", "")
         self.start()
         self.wait_phase(eng.NO_PHONE)
         time.sleep(1.0)
-        before = open_fds()
+        before = stable_fds()
         time.sleep(4)
-        self.assertLessEqual(open_fds(), before + 1)
+        assert_fds_flat(self, before)
 
     def test_losing_the_phone_while_linked_is_noticed_within_the_recheck(self):
         self.world.start_phone()

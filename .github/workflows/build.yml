@@ -83,6 +83,12 @@ jobs:
         with:
           name: windows
           path: windows/publish/Login-Relay-Windows-*.zip
+      - name: Upload the USB probe (a test tool to run on a real PC with a phone)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-usb-probe
+          path: windows/publish/probe/
+          if-no-files-found: warn
       - name: Attach to the release
         if: env.RELEASE_TAG != ''
         shell: bash
@@ -99,7 +105,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
-            xvfb dbus-x11 xdg-utils dpkg-dev
+            python3-usb xvfb dbus-x11 xdg-utils dpkg-dev
       - name: Unit tests
         run: python3 -m unittest discover -s linux/tests -v
       - name: Phone app redirect checks (shared vectors, plain JVM)

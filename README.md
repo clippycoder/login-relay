@@ -79,8 +79,10 @@ to the app, so nothing needs adb at all.
 Status: sign-in and sign-out work on one phone (a CAT S22 Flip, Android 11) that **also had USB debugging
 on**. **Not yet tested with USB debugging off**, where the phone may not appear on the cable until you pick
 "File transfer". An adb server holds a phone exclusively and blocks the switch, so the Mac app stops the adb
-server when it hits that (it restarts when needed). macOS only so far; the Linux app is next. There is no
-Windows version, because it would need a driver installed for the phone.
+server when it hits that (it restarts when needed). macOS has it first; Linux has it too but has only been
+tested against a simulated phone (pick **Connect over → USB accessory**; the .deb installs a udev rule that
+gives you access to the phone). Windows needs a driver installed for the phone and for the accessory device
+(see below), so it is still being built.
 
 ### Windows
 

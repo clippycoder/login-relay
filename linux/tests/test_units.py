@@ -14,7 +14,7 @@ import unittest
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import FakeWorld, open_fds, wait_until  # noqa: E402
+from support import FakeWorld, stable_fds, assert_fds_flat, wait_until  # noqa: E402
 
 from loginrelay import adb as adbmod  # noqa: E402
 from loginrelay import installer  # noqa: E402
@@ -59,14 +59,14 @@ class ExecProcessTests(unittest.TestCase):
     def test_no_file_descriptor_leak(self):
         tool = script("echo hi")
         adbmod.exec_process(tool, [])
-        before = open_fds()
+        before = stable_fds()
         for _ in range(60):
             adbmod.exec_process(tool, [])
         slow = script("sleep 30")
         for _ in range(3):
             adbmod.exec_process(slow, [], timeout=0.2)
         adbmod.exec_process("/nonexistent/adb", [])
-        self.assertLessEqual(open_fds(), before)
+        assert_fds_flat(self, before)
 
 
 class AdbTests(unittest.TestCase):
@@ -202,7 +202,7 @@ class PhoneLinkTests(unittest.TestCase):
         link.send({"type": "late"})  # harmless after close
 
     def test_sockets_are_closed(self):
-        before = open_fds()
+        before = stable_fds()
         for _ in range(10):
             port = self.serve(lambda c: c.sendall(b'{"a":1}\n'))
             link = PhoneLink()
@@ -214,7 +214,7 @@ class PhoneLinkTests(unittest.TestCase):
         for srv in self.servers:  # the test's own listeners
             srv.close()
         time.sleep(0.3)
-        self.assertLessEqual(open_fds(), before)
+        assert_fds_flat(self, before)
 
 
 class InstallerTests(unittest.TestCase):

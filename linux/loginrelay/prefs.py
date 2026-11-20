@@ -56,7 +56,7 @@ def find_share_file(relative: str, env=None) -> Optional[str]:
 
 
 class Prefs:
-    """adb path, selected phone, notifications, launch-at-login, first-launch flag."""
+    """adb path, selected phone, connection type, notifications, launch-at-login, first-launch flag."""
 
     def __init__(self, path: Optional[str] = None):
         self.path = path or default_prefs_path()
@@ -119,6 +119,26 @@ class Prefs:
     @selected_serial.setter
     def selected_serial(self, value: Optional[str]) -> None:
         self._set("selectedSerial", value)
+
+    @property
+    def transport(self) -> str:
+        """How the computer reaches the phone: "adb" (the default) or "usb" (accessory mode)."""
+        v = self._get("transport")
+        return v if v in ("adb", "usb") else "adb"
+
+    @transport.setter
+    def transport(self, value: str) -> None:
+        self._set("transport", value if value in ("adb", "usb") else "adb")
+
+    @property
+    def usb_selected(self) -> Optional[str]:
+        """Which USB phone to use when several are plugged in (a port location such as "1-4.2")."""
+        v = self._get("usbSelected")
+        return v if isinstance(v, str) and v else None
+
+    @usb_selected.setter
+    def usb_selected(self, value: Optional[str]) -> None:
+        self._set("usbSelected", value)
 
     @property
     def notifications(self) -> bool:

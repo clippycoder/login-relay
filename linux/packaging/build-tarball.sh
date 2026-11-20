@@ -39,6 +39,7 @@ for f in "$linux"/data/tray/*.png; do
   install -m 644 "$f" "$stage/data/tray/$(basename "$f")"
 done
 install -m 644 "$linux/data/io.github.clippycoder.LoginRelay.desktop" "$stage/data/"
+install -m 644 "$here/70-loginrelay.rules" "$stage/data/70-loginrelay.rules"
 if [ "${LOGINRELAY_NO_APK:-}" != 1 ]; then
   install -m 644 "$APK" "$stage/data/login-relay.apk"
   printf '%s\n' "$PHONE_VERSION" > "$stage/data/phone-app-version.txt"
@@ -87,6 +88,8 @@ if [ "${1:-}" = "--uninstall" ]; then
   find "$icons/hicolor" -name 'io.github.clippycoder.LoginRelay.png' -delete 2>/dev/null || true
   refresh
   echo "Login Relay removed from $PREFIX."
+  [ -f /etc/udev/rules.d/70-loginrelay.rules ] \
+    && echo "The udev rule is still installed; remove it with: sudo rm /etc/udev/rules.d/70-loginrelay.rules"
   exit 0
 fi
 
@@ -98,6 +101,8 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
   || { echo "Login Relay needs Python 3.9 or newer." >&2; exit 1; }
 python3 -c 'import gi' 2>/dev/null \
   || echo "note: PyGObject isn't installed (Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1)" >&2
+python3 -c 'import usb.core' 2>/dev/null \
+  || echo "note: pyusb isn't installed, so USB accessory mode won't work (Debian/Ubuntu: sudo apt install python3-usb)." >&2
 command -v adb >/dev/null 2>&1 \
   || echo "note: adb isn't installed; Login Relay can download Google's platform-tools for you from its menu." >&2
 
@@ -107,6 +112,7 @@ cp "$src"/lib/loginrelay/*.py "$lib/loginrelay/"
 cp -R "$src/data/tray" "$share/tray"
 [ -f "$src/data/login-relay.apk" ] && cp "$src/data/login-relay.apk" "$share/login-relay.apk"
 [ -f "$src/data/phone-app-version.txt" ] && cp "$src/data/phone-app-version.txt" "$share/phone-app-version.txt"
+cp "$src/data/70-loginrelay.rules" "$share/70-loginrelay.rules"
 mkdir -p "$icons"
 cp -R "$src/data/icons/hicolor" "$icons/"
 
@@ -130,6 +136,15 @@ chmod 644 "$desktop"
 refresh
 
 echo "Installed to $PREFIX. Start it from your applications menu or run: $bin"
+echo
+echo "USB accessory mode (connecting over a plain USB cable, no USB debugging) needs access to the phone's"
+echo "USB device. A per-user install can't grant that; without it Login Relay reports a permission error"
+echo "in that mode (adb mode is not affected). To allow it, run these two commands once, as root:"
+echo
+echo "  sudo install -m 644 $(q "$share/70-loginrelay.rules") /etc/udev/rules.d/70-loginrelay.rules"
+echo "  sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=usb"
+echo
+echo "Then unplug and replug the phone. (Undo with: sudo rm /etc/udev/rules.d/70-loginrelay.rules)"
 case ":$PATH:" in *":$PREFIX/bin:"*) ;; *) echo "($PREFIX/bin isn't on your PATH.)" ;; esac
 INSTALL
 chmod 755 "$stage/install.sh"

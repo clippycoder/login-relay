@@ -24,6 +24,11 @@ class Device:
         return self.state == "device"
 
     @property
+    def is_usb(self) -> bool:
+        """A phone reached over a USB accessory pipe rather than adb (serial "usb:<location>")."""
+        return self.serial.startswith("usb:")
+
+    @property
     def title(self) -> str:
         return self.serial if not self.model else self.model.replace("_", " ")
 
