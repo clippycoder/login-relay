@@ -26,12 +26,12 @@ $Zip = Join-Path $Publish "Login-Relay-Windows-x64-$Version.zip"
 
 $Libs = Join-Path $PSScriptRoot 'libs'
 $LibusbDll = Join-Path $Libs 'libusb-1.0.dll'
-$LibusbLicense = Join-Path $Libs 'libusb-COPYING.txt'
+$LibusbLicense = Join-Path $PSScriptRoot 'third-party\libusb-COPYING.txt'  # LGPL-2.1 text, kept in the repo (the release archive has none)
 
 function Get-Libusb {
-    if ((Test-Path -LiteralPath $LibusbDll) -and (Test-Path -LiteralPath $LibusbLicense)) { return }
-    $Tag = 'v1.0.27'
-    $AssetName = 'libusb-1.0.27.7z'
+    if (Test-Path -LiteralPath $LibusbDll) { return }
+    $Tag = 'v1.0.30'
+    $AssetName = 'libusb-1.0.30.7z'
     $Url = "https://github.com/libusb/libusb/releases/download/$Tag/$AssetName"
     $Api = "https://api.github.com/repos/libusb/libusb/releases/tags/$Tag"
     New-Item -ItemType Directory -Force -Path $Libs | Out-Null
@@ -79,11 +79,8 @@ function Get-Libusb {
             if ($LASTEXITCODE -ne 0) { throw "tar could not extract $AssetName (exit code $LASTEXITCODE); install 7-Zip and try again" }
         }
         $Dll = Join-Path $Out 'VS2022\MS64\dll\libusb-1.0.dll'
-        $License = Join-Path $Out 'COPYING'
         if (-not (Test-Path -LiteralPath $Dll)) { throw "$AssetName does not contain VS2022\MS64\dll\libusb-1.0.dll" }
-        if (-not (Test-Path -LiteralPath $License)) { throw "$AssetName does not contain COPYING" }
         Copy-Item -LiteralPath $Dll -Destination $LibusbDll -Force
-        Copy-Item -LiteralPath $License -Destination $LibusbLicense -Force
         Write-Host "   libusb-1.0.dll is in $Libs"
     } finally {
         Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
