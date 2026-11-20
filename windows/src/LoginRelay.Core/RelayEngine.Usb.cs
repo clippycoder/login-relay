@@ -110,6 +110,10 @@ namespace LoginRelay.Core
             {
                 link.Close();
             }
+            // Forget the old link now. Its "closed" notice arrives later and must not be mistaken for the
+            // new connection's: a stale USB close would otherwise clear the phone app's version that the
+            // adb check just found.
+            _currentLink = null;
             CancelDelivery();
             _prefs.Transport = kind;
             AdbTool = null;
