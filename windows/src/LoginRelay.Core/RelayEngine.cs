@@ -22,12 +22,12 @@ namespace LoginRelay.Core
 
     public enum PhaseKind
     {
-        NoAdb,
         NoPhone,
-        Unauthorized,
-        NeedsApp,
 
-        /// <summary>USB mode: a phone is plugged in but Login Relay on it isn't answering yet.</summary>
+        /// <summary>A phone is plugged in but libusb can't open it (no WinUSB driver, no access, not supported).</summary>
+        CantOpen,
+
+        /// <summary>A phone is plugged in but Login Relay on it isn't answering yet.</summary>
         Connecting,
         Ready,
         Working,
@@ -71,16 +71,14 @@ namespace LoginRelay.Core
     }
 
     /// <summary>
-    /// Watches for a phone, keeps a link to the Login Relay app on it, and runs each login: opens the page
-    /// in the browser, catches the redirect, and hands it back to the phone.
+    /// Watches for a phone over USB (accessory mode), keeps a link to the Login Relay app on it, and runs each
+    /// login: opens the page in the browser, catches the redirect, and hands it back to the phone.
     ///
     /// All state lives on the UI thread (reached through <see cref="IUiDispatcher"/>); the public members
-    /// below must be called there. One background thread polls adb and owns the link.
+    /// below must be called there. One background thread watches the USB bus and owns the link.
     /// </summary>
     public sealed partial class RelayEngine
     {
-        public const string PhonePackage = "io.github.clippycoder.oauthrelay";
-
         private readonly IUiDispatcher _ui;
         private readonly IPlatform _platform;
         private readonly Prefs _prefs;
@@ -99,30 +97,17 @@ namespace LoginRelay.Core
         public bool BrowserDisabled { get; set; } =
             string.Equals(Environment.GetEnvironmentVariable("LOGINRELAY_BROWSER"), "none", StringComparison.Ordinal);
 
-        /// <summary>How to find adb (given the user's chosen path, if any). Replaced by tests.</summary>
-        public Func<string?, IAdb?> AdbFactory { get; set; } = DefaultAdbFactory;
-
         /// <summary>Gets every activity-log line, formatted with a timestamp (for LOGINRELAY_LOG and --verbose).</summary>
         public Action<string>? LogSink { get; set; }
 
         /// <summary>Raised on the UI thread whenever something the UI shows may have changed.</summary>
         public event Action? Changed;
 
-        private static IAdb? DefaultAdbFactory(string? userChoice)
-        {
-            string? path = Adb.Locate(userChoice, AdbInstaller.InstalledPath);
-            return path == null ? null : new Adb(path);
-        }
-
         // ---- state (UI thread) --------------------------------------------------------------------
 
-        public IAdb? AdbTool { get; private set; }
-        public IReadOnlyList<Device> Devices { get; private set; } = new List<Device>();
         public Device? Phone { get; private set; }
-        public string? PhoneVersion { get; private set; }
         public bool Linked { get; private set; }
         public Flow? Active { get; private set; }
-        public string? Busy { get; private set; }
 
         private readonly List<LogLine> _log = new List<LogLine>();
 
@@ -133,60 +118,7 @@ namespace LoginRelay.Core
 
         public PhaseInfo Phase
         {
-            get
-            {
-                if (Transport == TransportKind.Usb)
-                {
-                    return UsbPhaseInfo();
-                }
-                if (AdbTool == null)
-                {
-                    return new PhaseInfo(PhaseKind.NoAdb);
-                }
-                if (Phone == null)
-                {
-                    Device? blocked = Devices.FirstOrDefault(d => !d.IsUsable);
-                    if (blocked != null)
-                    {
-                        return new PhaseInfo(PhaseKind.Unauthorized, blocked);
-                    }
-                    return new PhaseInfo(PhaseKind.NoPhone);
-                }
-                if (PhoneVersion == null)
-                {
-                    return new PhaseInfo(PhaseKind.NeedsApp, Phone);
-                }
-                if (Active != null)
-                {
-                    return new PhaseInfo(PhaseKind.Working, Phone, Active);
-                }
-                return new PhaseInfo(PhaseKind.Ready, Phone);
-            }
-        }
-
-        /// <summary>The version of the phone app bundled with this app, if any.</summary>
-        public string? BundledPhoneVersion
-        {
-            get { return _platform.BundledPhoneVersion; }
-        }
-
-        public string? BundledApk
-        {
-            get { return _platform.BundledApkPath; }
-        }
-
-        public bool PhoneAppIsOutdated
-        {
-            get
-            {
-                string? have = PhoneVersion;
-                string? bundled = BundledPhoneVersion;
-                if (have == null || bundled == null)
-                {
-                    return false;
-                }
-                return Redirect.VersionLess(have, bundled);
-            }
+            get { return UsbPhaseInfo(); }
         }
 
         // ---- background loop state ----------------------------------------------------------------
@@ -214,7 +146,7 @@ namespace LoginRelay.Core
         public void Start()
         {
             StartLoop();
-            // If the polling thread ever stops making progress (adb wedged, a missed wake-up), say so
+            // If the polling thread ever stops making progress (libusb wedged, a missed wake-up), say so
             // and start over instead of showing a stale state forever.
             _watchdog = new Timer(watchdogState => _ui.Post(WatchdogCheck), null, WatchdogInterval, WatchdogInterval);
             Log("Started.");
@@ -238,18 +170,7 @@ namespace LoginRelay.Core
         {
             int gen = Interlocked.Increment(ref _generation);
             Tick();
-            bool usb = _prefs.Transport == TransportKind.Usb;
-            var thread = new Thread(() =>
-            {
-                if (usb)
-                {
-                    UsbLoop(gen);
-                }
-                else
-                {
-                    Loop(gen);
-                }
-            });
+            var thread = new Thread(() => UsbLoop(gen));
             thread.IsBackground = true;
             thread.Name = "relay-loop";
             thread.Start();
@@ -278,22 +199,6 @@ namespace LoginRelay.Core
                     t.Dispose();
                 }
                 _delays.Clear();
-            }
-            IAdb? adb = AdbTool;
-            Device? phone = Phone;
-            if (adb != null && phone != null)
-            {
-                try
-                {
-                    int? port = adb.ExistingForward(phone.Serial);
-                    if (port.HasValue)
-                    {
-                        adb.RemoveForward(port.Value, phone.Serial);
-                    }
-                }
-                catch (Exception)
-                {
-                }
             }
         }
 
@@ -403,186 +308,7 @@ namespace LoginRelay.Core
             }
         }
 
-        // ---- background loop ----------------------------------------------------------------------
-
-        private void Loop(int gen)
-        {
-            DateTime lastCheck = DateTime.MinValue;
-            int? port = null;
-            Device? ready = null;
-            IAdb? adb = null;
-            string? lastError = null;
-
-            while (!_stopping && gen == Volatile.Read(ref _generation))
-            {
-                try
-                {
-                    Tick();
-                    bool due;
-                    lock (_stateLock)
-                    {
-                        due = _forceCheck || (DateTime.UtcNow - lastCheck) >= CheckInterval;
-                        _forceCheck = false;
-                    }
-
-                    if (due)
-                    {
-                        lastCheck = DateTime.UtcNow;
-                        IAdb? found = AdbFactory(_prefs.AdbPath);
-                        adb = found;
-                        IReadOnlyList<Device> devs = new List<Device>();
-                        Device? chosen = null;
-                        string? version = null;
-                        port = null;
-                        if (found != null)
-                        {
-                            devs = found.Devices();
-                            Tick();
-                            chosen = Choose(devs);
-                            if (chosen != null)
-                            {
-                                version = found.InstalledVersion(chosen.Serial, PhonePackage);
-                                Tick();
-                                if (version != null)
-                                {
-                                    port = found.ExistingForward(chosen.Serial);
-                                    Tick();
-                                    if (!port.HasValue)
-                                    {
-                                        port = found.Forward(chosen.Serial);
-                                    }
-                                }
-                            }
-                        }
-                        ready = (version != null && port.HasValue) ? chosen : null;
-
-                        IAdb? publishAdb = found;
-                        IReadOnlyList<Device> publishDevs = devs;
-                        Device? publishPhone = chosen;
-                        string? publishVersion = version;
-                        _ui.Post(() =>
-                        {
-                            if (gen == Volatile.Read(ref _generation))
-                            {
-                                Publish(publishAdb, publishDevs, publishPhone, publishVersion);
-                            }
-                        });
-                    }
-
-                    if (port.HasValue && ready != null)
-                    {
-                        Device readyPhone = ready;
-                        var link = new PhoneLink();
-                        var closed = new ManualResetEventSlim(false);
-                        link.OnMessage = msg => HandleMessage(msg, link, readyPhone);
-                        link.OnClose = () =>
-                        {
-                            _ui.Post(() => LinkClosed(link));
-                            closed.Set();
-                        };
-                        if (link.Open(port.Value))
-                        {
-                            if (_stopping || gen != Volatile.Read(ref _generation))
-                            {
-                                // The connection type changed while we were connecting.
-                                link.Close();
-                                continue;
-                            }
-                            _ui.Post(() => LinkOpened(link));
-                            // adb can hold a connection open without it reaching the phone (for instance
-                            // while a replugged phone is still reconnecting), so keep checking that the
-                            // phone is really there rather than waiting for the link to end on its own.
-                            while (!closed.Wait(CheckInterval))
-                            {
-                                Tick();
-                                if (_stopping || gen != Volatile.Read(ref _generation))
-                                {
-                                    link.Close();
-                                    break;
-                                }
-                                IReadOnlyList<Device> here = adb != null ? adb.Devices() : new List<Device>();
-                                Tick();
-                                if (!here.Any(h => h.Serial == readyPhone.Serial && h.IsUsable))
-                                {
-                                    link.Close();
-                                    break;
-                                }
-                            }
-                            lastCheck = DateTime.MinValue; // look at the phone again straight away
-                            continue;
-                        }
-                    }
-                    _wake.WaitOne(RetryDelay);
-                }
-                catch (Exception ex)
-                {
-                    // Never let the loop die silently; say so once per distinct problem and carry on.
-                    string message = "Checking for the phone failed: " + ex.Message;
-                    if (message != lastError)
-                    {
-                        lastError = message;
-                        LogAsync(message);
-                    }
-                    Tick();
-                    if (!_stopping)
-                    {
-                        _wake.WaitOne(RetryDelay);
-                    }
-                }
-            }
-        }
-
-        private Device? Choose(IReadOnlyList<Device> devs)
-        {
-            List<Device> usable = devs.Where(d => d.IsUsable).ToList();
-            string? selected = _prefs.SelectedSerial;
-            if (selected != null)
-            {
-                Device? match = usable.FirstOrDefault(d => d.Serial == selected);
-                if (match != null)
-                {
-                    return match;
-                }
-            }
-            return usable.FirstOrDefault();
-        }
-
-        // ---- UI-thread publishing -----------------------------------------------------------------
-
-        private void Publish(IAdb? adb, IReadOnlyList<Device> devices, Device? phone, string? version)
-        {
-            bool adbChanged = AdbTool?.ExePath != adb?.ExePath;
-            bool devicesChanged = !Devices.SequenceEqual(devices);
-            bool changed = adbChanged || devicesChanged || Phone != phone || PhoneVersion != version;
-            if (adbChanged)
-            {
-                Log(adb == null ? "adb not found." : "Using adb at " + adb.ExePath + ".");
-            }
-            if (devicesChanged && devices.Count > 0)
-            {
-                Log("adb lists: " + string.Join(", ", devices.Select(d => d.Serial + " (" + d.State + ")")));
-            }
-            if (Phone != phone)
-            {
-                Log(phone != null ? "Phone: " + phone.Title + " (" + phone.Serial + ")" : "No phone.");
-            }
-            if (PhoneVersion != version && phone != null)
-            {
-                Log(version != null ? "Login Relay " + version + " is on the phone." : "Login Relay isn't on the phone.");
-            }
-            AdbTool = adb;
-            Devices = devices;
-            Phone = phone;
-            PhoneVersion = version;
-            if (changed)
-            {
-                RaiseChanged();
-            }
-            if ((phone == null || version == null) && Active != null)
-            {
-                CancelActive("Phone not available", false);
-            }
-        }
+        // ---- the link ------------------------------------------------------------------------------
 
         private void LinkOpened(IPhoneConnection link)
         {
@@ -592,7 +318,7 @@ namespace LoginRelay.Core
             }
             _currentLink = link;
             Linked = true;
-            Log(link is UsbPhoneLink ? "USB connection open." : "Linked to Login Relay on the phone.");
+            Log("USB connection open.");
             RaiseChanged();
         }
 
@@ -602,12 +328,8 @@ namespace LoginRelay.Core
             {
                 _currentLink = null;
                 Linked = false;
-                if (link is UsbPhoneLink)
-                {
-                    UsbAlive = false;
-                    _usbEverAlive = false;
-                    PhoneVersion = null;
-                }
+                UsbAlive = false;
+                _usbEverAlive = false;
                 if (!_stopping)
                 {
                     Log("Link to the phone closed.");
@@ -663,10 +385,6 @@ namespace LoginRelay.Core
                 string? transport = StringProperty(msg, "transport");
                 _ui.Post(() =>
                 {
-                    if (phone.IsUsb)
-                    {
-                        PhoneVersion = version;
-                    }
                     Log("Login Relay " + (version ?? "?") + " on the phone says hello (" + (transport ?? "?") + ").");
                 });
             }
@@ -860,42 +578,8 @@ namespace LoginRelay.Core
             }
             Log("Returning to " + flow.Request.AppName + " on the phone…");
             RaiseChanged();
-            if (flow.Phone.IsUsb)
-            {
-                // No adb here: the phone checks the result itself and hands it to the app.
-                SendCallbackOverUsb(flow, callback);
-                return;
-            }
-            IAdb? adb = AdbTool;
-            if (adb == null)
-            {
-                flow.Link.Send("error", "Couldn't hand the result back to the app.");
-                return;
-            }
-            ThreadPool.QueueUserWorkItem(queued =>
-            {
-                ProcessResult r;
-                try
-                {
-                    r = adb.Deliver(flow.Phone.Serial, callback, flow.Request.Caller);
-                }
-                catch (Exception ex)
-                {
-                    r = new ProcessResult(-1, "", ex.Message);
-                }
-                _ui.Post(() =>
-                {
-                    if (!r.Ok || r.Out.Contains("Error", StringComparison.Ordinal))
-                    {
-                        Log("The phone couldn't take the result: " + (r.Out.Length == 0 ? r.Err : r.Out));
-                        flow.Link.Send("error", "Couldn't hand the result back to the app.");
-                        return;
-                    }
-                    Log("Done: " + flow.Request.AppName + " is finishing the " + flow.Request.Verb + ".");
-                    // Let the app's own screen take the result before Login Relay closes.
-                    After(DoneDelay, () => flow.Link.Send("done"));
-                });
-            });
+            // The phone checks the result itself and hands it to the app.
+            SendCallbackOverUsb(flow, callback);
         }
 
         public void CancelActive(string reason, bool notifyPhone)
@@ -959,112 +643,6 @@ namespace LoginRelay.Core
             }
         }
 
-        // ---- phone-side app management ------------------------------------------------------------
-
-        public void InstallPhoneApp()
-        {
-            IAdb? adb = AdbTool;
-            Device? phone = Phone;
-            string? apk = BundledApk;
-            if (adb == null || phone == null || apk == null)
-            {
-                return;
-            }
-            Busy = "Installing Login Relay on " + phone.Title + "…";
-            Log(Busy);
-            RaiseChanged();
-            ThreadPool.QueueUserWorkItem(queued =>
-            {
-                ProcessResult r;
-                try
-                {
-                    r = adb.Install(phone.Serial, apk);
-                }
-                catch (Exception ex)
-                {
-                    r = new ProcessResult(-1, "", ex.Message);
-                }
-                _ui.Post(() =>
-                {
-                    Busy = null;
-                    if (r.Ok && r.Out.Contains("Success", StringComparison.Ordinal))
-                    {
-                        Log("Installed.");
-                    }
-                    else
-                    {
-                        string why = string.Join(" ", new[] { r.Out, r.Err }.Where(s => s.Length > 0));
-                        Log("Install failed: " + why);
-                        _platform.ShowError("Couldn't install Login Relay on the phone", why);
-                    }
-                    RaiseChanged();
-                    RefreshNow();
-                });
-            });
-        }
-
-        public void OpenOnPhone()
-        {
-            IAdb? adb = AdbTool;
-            Device? phone = Phone;
-            if (adb == null || phone == null)
-            {
-                return;
-            }
-            ThreadPool.QueueUserWorkItem(queued =>
-            {
-                try
-                {
-                    adb.Shell(phone.Serial, "input keyevent KEYCODE_WAKEUP; am start -n " + PhonePackage + "/.RelayActivity");
-                }
-                catch (Exception)
-                {
-                }
-            });
-        }
-
-        public void DownloadPlatformTools()
-        {
-            Busy = "Downloading Android platform-tools…";
-            Log(Busy);
-            RaiseChanged();
-            ThreadPool.QueueUserWorkItem(queued =>
-            {
-                string? failure = null;
-                try
-                {
-                    AdbInstaller.Install(step => LogAsync(step));
-                }
-                catch (Exception ex)
-                {
-                    failure = ex.Message;
-                }
-                _ui.Post(() =>
-                {
-                    Busy = null;
-                    if (failure != null)
-                    {
-                        Log("Download failed: " + failure);
-                        _platform.ShowError("Couldn't download platform-tools", failure);
-                    }
-                    RaiseChanged();
-                    RefreshNow();
-                });
-            });
-        }
-
-        public void SelectDevice(string serial)
-        {
-            _prefs.SelectedSerial = serial;
-            RefreshNow();
-        }
-
-        public void ChooseAdb(string path)
-        {
-            _prefs.AdbPath = path;
-            RefreshNow();
-        }
-
         // ---- notifications ------------------------------------------------------------------------
 
         public void Notify(string title, string body)
@@ -1082,48 +660,24 @@ namespace LoginRelay.Core
             }
         }
 
-        // ---- wording shared by the window and the menu (word for word from the macOS app) ---------
+        // ---- wording shared by the window and the menu --------------------------------------------
 
         /// <summary>Headline and one line of explanation for the current phase.</summary>
-        public (string Status, string Detail) Describe(bool brief = false)
+        public (string Status, string Detail) Describe()
         {
-            if (Busy != null)
-            {
-                return (Busy, "This takes a moment.");
-            }
             PhaseInfo phase = Phase;
             switch (phase.Kind)
             {
-                case PhaseKind.NoAdb:
-                    return ("adb not found", "Login Relay talks to the phone through adb, part of Android platform-tools.");
                 case PhaseKind.NoPhone:
-                    if (Transport == TransportKind.Usb)
-                    {
-                        return DescribeUsbNoPhone(brief);
-                    }
-                    return ("No phone connected", "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).");
+                    return DescribeUsbNoPhone();
+                case PhaseKind.CantOpen:
+                    return (UsbText.CantOpenHeadline, UsbText.CantOpenDetail);
                 case PhaseKind.Connecting:
-                    return DescribeUsbConnecting(phase, brief);
-                case PhaseKind.Unauthorized:
-                {
-                    Device d = phase.Phone!;
-                    if (d.State == "unauthorized")
-                    {
-                        return (d.Title + " is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt.");
-                    }
-                    return (d.Title + " isn't responding (" + d.State + ")", "Unplug the cable and plug it back in, then choose Check Again.");
-                }
-                case PhaseKind.NeedsApp:
-                {
-                    Device d = phase.Phone!;
-                    return ("Login Relay isn't on " + d.Title,
-                        BundledApk != null ? "Install it on the phone to start." : "Install login-relay.apk on the phone.");
-                }
+                    return DescribeUsbConnecting(phase);
                 case PhaseKind.Ready:
                 {
                     Device d = phase.Phone!;
-                    string outdated = Transport == TransportKind.Adb && PhoneAppIsOutdated ? " An update for the phone app is available." : "";
-                    return (d.Title + " is ready", "Sign in to an app on the phone and the page opens here." + outdated);
+                    return (d.Title + " is ready", "Sign in to an app on the phone and the page opens here.");
                 }
                 default:
                 {

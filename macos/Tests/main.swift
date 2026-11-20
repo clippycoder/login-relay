@@ -65,11 +65,6 @@ check(RelayRequest(url: "https://example.com", referrer: nil).appName == "An app
 check(urlParams("app://cb#access_token=t&state=s")["state"] == "s", "fragment params")
 check(urlParams("app://cb?a=1&a=2")["a"] == "1", "first value wins")
 
-// shell quoting
-check(shellQuote("a b") == "'a b'", "quote simple")
-check(shellQuote("it's") == "'it'\"'\"'s'", "quote apostrophe")
-check(shellQuote("x;rm -rf /") == "'x;rm -rf /'", "quote metachars")
-
 // USB framing
 let frame = { (n: Int) in usbFrame(Data(repeating: 0x41, count: n)) }
 check(frame(10).count == 11 && frame(10).last == 0x0A, "frame adds a newline")
@@ -89,12 +84,90 @@ check(broken.feed(Data(repeating: 0x41, count: LineSplitter.maxLine + 1)) == nil
 check(isWebURL("https://example.com/a?b=c") && isWebURL("HTTP://example.com"), "web URLs")
 check(!isWebURL("file:///etc/passwd") && !isWebURL("com.example.app://cb") && !isWebURL("javascript:alert(1)") && !isWebURL("no scheme"), "non-web URLs refused")
 
-// version comparison
-check(versionLess("0.2.2", "0.3.0"), "0.2.2 < 0.3.0")
-check(!versionLess("0.3.0", "0.3.0"), "equal isn't less")
-check(!versionLess("0.10.0", "0.9.9"), "numeric, not lexical")
-check(versionLess("0.3", "0.3.1"), "shorter is padded with zeros")
-check(!versionLess("1.0.0", "0.99.99"), "major wins")
+// the phone link over a plain socket (what LOGINRELAY_FAKE_PHONE uses), against a scripted phone
+func listen() -> (fd: Int32, port: UInt16) {
+    let s = socket(AF_INET, SOCK_STREAM, 0)
+    var one: Int32 = 1
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    addr.sin_port = 0
+    _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+    Darwin.listen(s, 4)
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(s, $0, &len) } }
+    return (s, UInt16(bigEndian: addr.sin_port))
+}
+check(SocketChannel.connect("127.0.0.1:1") == nil, "connect to a closed port fails")
+check(SocketChannel.connect("no-port") == nil, "address without a port is refused")
+
+let server = listen()
+let phoneSaw = NSLock()
+var phoneLines: [String] = []
+let serverDone = DispatchSemaphore(value: 0)
+Thread {
+    let conn = accept(server.fd, nil, nil)
+    func say(_ text: String) { _ = text.withCString { write(conn, $0, strlen($0)) } }
+    say("{\"v\":1,\"type\":\"hello\",\"transport\":\"usb\",\"version\":\"9.9.9\"}\n")
+    var pending = Data()
+    var chunk = [UInt8](repeating: 0, count: 1024)
+    var sentOpen = false
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline {
+        var pfd = pollfd(fd: conn, events: Int16(POLLIN), revents: 0)
+        if poll(&pfd, 1, 200) <= 0 { continue }
+        let n = read(conn, &chunk, chunk.count)
+        if n <= 0 { break }
+        pending.append(chunk, count: n)
+        while let nl = pending.firstIndex(of: 0x0A) {
+            let line = String(decoding: pending[pending.startIndex..<nl], as: UTF8.self)
+            pending.removeSubrange(pending.startIndex...nl)
+            phoneSaw.lock(); phoneLines.append(line); phoneSaw.unlock()
+            if line.contains("\"ping\"") && !sentOpen {
+                sentOpen = true
+                say("{\"type\":\"pong\"}\n{\"type\":\"open\",\"url\":\"https://x.example/a\"}\n")
+            }
+            if line.contains("\"callback\"") { say("{\"type\":\"delivered\"}\n"); Darwin.close(conn); serverDone.signal(); return }
+        }
+    }
+    Darwin.close(conn); serverDone.signal()
+}.start()
+
+if let channel = SocketChannel.connect("127.0.0.1:\(server.port)") {
+    check(!channel.padsBulkPackets, "socket channel doesn't pad")
+    let link = PhoneLink(channel: channel)
+    let gotHello = DispatchSemaphore(value: 0), gotOpen = DispatchSemaphore(value: 0)
+    let gotDelivered = DispatchSemaphore(value: 0), closedSem = DispatchSemaphore(value: 0), aliveSem = DispatchSemaphore(value: 0)
+    link.onMessage = { m in
+        switch m["type"] as? String {
+        case "hello": check(m["version"] as? String == "9.9.9", "hello carries the version"); gotHello.signal()
+        case "open": check(m["url"] as? String == "https://x.example/a", "open carries the url"); gotOpen.signal()
+        case "delivered": gotDelivered.signal()
+        default: break
+        }
+    }
+    link.onAlive = { if $0 { aliveSem.signal() } }
+    link.onClose = { closedSem.signal() }
+    link.start()
+    check(gotHello.wait(timeout: .now() + 5) == .success, "hello arrives")
+    check(aliveSem.wait(timeout: .now() + 5) == .success, "link becomes alive once the phone speaks")
+    check(gotOpen.wait(timeout: .now() + 5) == .success, "open arrives after the first ping was answered")
+    link.send(["type": "callback", "url": "com.example.app://cb?code=1"])
+    check(gotDelivered.wait(timeout: .now() + 5) == .success, "delivered comes back after a callback")
+    check(closedSem.wait(timeout: .now() + 5) == .success, "link reports the phone hanging up")
+    check(serverDone.wait(timeout: .now() + 5) == .success, "scripted phone finished")
+    phoneSaw.lock()
+    check(phoneLines.contains { $0.contains("\"ping\"") }, "computer pings the phone")
+    let cbLine = phoneLines.first { $0.contains("\"callback\"") }
+    let cbObj = cbLine.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
+    check(cbObj?["url"] as? String == "com.example.app://cb?code=1", "callback reaches the phone as one clean JSON line")
+    check(phoneLines.allSatisfy { !$0.isEmpty }, "no blank padding lines on a socket")
+    phoneSaw.unlock()
+} else {
+    check(false, "connect to the scripted phone")
+}
+Darwin.close(server.fd)
 
 // ---- shared vectors (tests/vectors.json)
 func runVectors(_ path: String) {
@@ -126,10 +199,6 @@ func runVectors(_ path: String) {
     }
     for c in root["urlParams"] as? [[String: Any]] ?? [] {
         check(urlParams(c["url"] as! String) == (c["expect"] as? [String: String] ?? [:]), "vector[urlParams] \(c["name"] ?? "?")")
-    }
-    for c in root["shellQuote"] as? [[String]] ?? [] { check(shellQuote(c[0]) == c[1], "vector[shellQuote] \(c[0])") }
-    for c in root["versionLess"] as? [[Any]] ?? [] {
-        check(versionLess(c[0] as! String, c[1] as! String) == (c[2] as! Bool), "vector[versionLess] \(c[0]) < \(c[1])")
     }
 }
 runVectors(CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "../../tests/vectors.json")

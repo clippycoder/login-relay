@@ -7,10 +7,8 @@ final class ActivityWindowController: NSWindowController {
     private let statusLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
     private let actionButton = NSButton(title: "", target: nil, action: nil)
-    private let secondaryButton = NSButton(title: "", target: nil, action: nil)
     private let logView = NSTextView()
     private var primary: (() -> Void)?
-    private var secondary: (() -> Void)?
 
     init(engine: RelayEngine) {
         self.engine = engine
@@ -51,10 +49,7 @@ final class ActivityWindowController: NSWindowController {
         actionButton.action = #selector(runPrimary)
         actionButton.bezelStyle = .rounded
         actionButton.keyEquivalent = "\r"
-        secondaryButton.target = self
-        secondaryButton.action = #selector(runSecondary)
-        secondaryButton.bezelStyle = .rounded
-        let buttons = NSStackView(views: [actionButton, secondaryButton])
+        let buttons = NSStackView(views: [actionButton])
         buttons.orientation = .horizontal
         buttons.spacing = 10
 
@@ -97,7 +92,6 @@ final class ActivityWindowController: NSWindowController {
     }
 
     @objc private func runPrimary() { primary?() }
-    @objc private func runSecondary() { secondary?() }
 
     func update() {
         let (status, detail) = Self.describe(engine)
@@ -105,34 +99,20 @@ final class ActivityWindowController: NSWindowController {
         detailLabel.stringValue = detail
 
         primary = nil
-        secondary = nil
         actionButton.isHidden = true
-        secondaryButton.isHidden = true
-        func offer(_ button: NSButton, _ title: String, _ action: @escaping () -> Void, primary isPrimary: Bool) {
-            button.title = title
-            button.isHidden = false
-            if isPrimary { primary = action } else { secondary = action }
+        func offer(_ title: String, _ action: @escaping () -> Void) {
+            actionButton.title = title
+            actionButton.isHidden = false
+            primary = action
         }
         switch engine.phase {
-        case .noAdb:
-            offer(actionButton, "Download Platform-Tools…", { AppDelegate.shared?.confirmDownloadPlatformTools() }, primary: true)
-            offer(secondaryButton, "Choose adb…", { AppDelegate.shared?.chooseAdb() }, primary: false)
-        case .needsApp:
-            if engine.bundledAPK != nil { offer(actionButton, "Install on Phone", { self.engine.installPhoneApp() }, primary: true) }
         case .ready:
-            // Opening and updating the phone app go through adb, so they're for the adb connection only.
-            if engine.transport == .adb {
-                offer(actionButton, "Open on Phone", { self.engine.openOnPhone() }, primary: true)
-                if engine.phoneAppIsOutdated { offer(secondaryButton, "Update on Phone", { self.engine.installPhoneApp() }, primary: false) }
-            }
-        case .connecting:
-            offer(actionButton, "Check Again", { self.engine.checkAgain() }, primary: true)
+            break
         case .working:
-            offer(actionButton, "Cancel", { self.engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }, primary: true)
-        case .noPhone, .unauthorized:
-            offer(actionButton, "Check Again", { self.engine.checkAgain() }, primary: true)
+            offer("Cancel") { self.engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }
+        case .noPhone, .connecting:
+            offer("Check Again") { self.engine.checkAgain() }
         }
-        if engine.busy != nil { actionButton.isEnabled = false } else { actionButton.isEnabled = true }
 
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
@@ -142,31 +122,16 @@ final class ActivityWindowController: NSWindowController {
 
     /// Headline and one line of explanation for the current phase. Shared with the menu.
     static func describe(_ engine: RelayEngine) -> (String, String) {
-        if let busy = engine.busy { return (busy, "This takes a moment.") }
         switch engine.phase {
-        case .noAdb:
-            return ("adb not found", "Login Relay talks to the phone through adb, part of Android platform-tools.")
         case .noPhone:
-            if engine.transport == .usb {
-                return ("No phone found over USB",
-                        "Plug the phone in and choose \u{201C}File transfer\u{201D} in its USB notification. USB debugging isn't needed.")
-            }
-            return ("No phone connected", "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).")
+            return ("No phone found over USB",
+                    "Plug the phone in and choose \u{201C}File transfer\u{201D} in its USB notification. USB debugging isn't needed.")
         case .connecting(let d, let detail):
             // Once the USB pipe is open the phone is plugged in and connected; it's just not answering yet.
             return (engine.linked ? "\(d.title) is connected over USB" : "Connecting to \(d.title)…",
                     detail.isEmpty ? "Waiting for the phone." : detail)
-        case .unauthorized(let d):
-            if d.state == "unauthorized" {
-                return ("\(d.title) is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt.")
-            }
-            return ("\(d.title) isn't responding (\(d.state))", "Unplug the cable and plug it back in, then choose Check Again.")
-        case .needsApp(let d):
-            return ("Login Relay isn't on \(d.title)",
-                    engine.bundledAPK != nil ? "Install it on the phone to start." : "Install login-relay.apk on the phone.")
         case .ready(let d):
-            let outdated = engine.transport == .adb && engine.phoneAppIsOutdated ? " An update for the phone app is available." : ""
-            return ("\(d.title) is ready", "Sign in to an app on the phone and the page opens here.\(outdated)")
+            return ("\(d.title) is ready", "Sign in to an app on the phone and the page opens here.")
         case .working(let flow):
             return ("\(flow.request.appName) \(flow.request.verb) in progress",
                     "Finish in your browser. If it asks to open Login Relay, allow it.")

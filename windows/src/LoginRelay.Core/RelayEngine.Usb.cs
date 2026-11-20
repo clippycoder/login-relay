@@ -29,34 +29,23 @@ namespace LoginRelay.Core
         public TimeSpan UsbOpenRetryDelay { get; set; } = TimeSpan.FromMilliseconds(500);
         public int UsbOpenAttempts { get; set; } = 6;
 
-        /// <summary>How often to ask Windows (WMI, slow) what it sees while no phone is usable.</summary>
-        public TimeSpan UsbDiagnosticsInterval { get; set; } = TimeSpan.FromSeconds(5);
-
         /// <summary>Shown on the phone as the accessory's description.</summary>
         public string HostName { get; set; } = Environment.MachineName;
 
-        /// <summary>How to reach libusb. Replaced by tests.</summary>
-        public Func<IUsbBackend> UsbBackendFactory { get; set; } = () => new LibUsbBackend();
-
-        /// <summary>Windows' own view of the USB devices (for the driver guide). Null means not available.</summary>
-        public IUsbDiagnostics? UsbDiagnostics { get; set; }
+        /// <summary>How to reach libusb (or, with LOGINRELAY_FAKE_PHONE, a TCP socket). Replaced by tests.</summary>
+        public Func<IUsbBackend> UsbBackendFactory { get; set; } = DefaultBackend;
 
         /// <summary>Stops the adb server, which holds a phone exclusively. Replaced by tests.</summary>
-        public Func<bool> StopAdbServer { get; set; } = DefaultStopAdbServer;
+        public Func<bool> StopAdbServer { get; set; } = AdbServer.Stop;
 
         // ---- state (UI thread) --------------------------------------------------------------------
-
-        public TransportKind Transport
-        {
-            get { return _prefs.Transport; }
-        }
 
         public IReadOnlyList<UsbDevice> UsbCandidates { get; private set; } = new List<UsbDevice>();
         public string UsbDetail { get; private set; } = "";
         public bool UsbAlive { get; private set; }
 
-        /// <summary>The latest driver diagnosis (USB mode only).</summary>
-        public UsbSetupInfo? UsbSetup { get; private set; }
+        /// <summary>The phone is plugged in but libusb can't open it (see <see cref="UsbText.CantOpenDetail"/>).</summary>
+        public bool UsbCantOpen { get; private set; }
 
         /// <summary>
         /// Login Relay on the phone has answered at least once on this connection. Android reclaims an idle app
@@ -71,11 +60,15 @@ namespace LoginRelay.Core
             Device? phone = Phone;
             if (phone == null)
             {
-                return new PhaseInfo(PhaseKind.NoPhone);
+                return new PhaseInfo(UsbCantOpen ? PhaseKind.CantOpen : PhaseKind.NoPhone);
             }
             if (Active != null)
             {
                 return new PhaseInfo(PhaseKind.Working, phone, Active);
+            }
+            if (UsbCantOpen)
+            {
+                return new PhaseInfo(PhaseKind.CantOpen, phone);
             }
             if (UsbAlive || _usbEverAlive)
             {
@@ -84,54 +77,20 @@ namespace LoginRelay.Core
             return new PhaseInfo(PhaseKind.Connecting, phone, null, UsbDetail);
         }
 
-        private static bool DefaultStopAdbServer()
+        private static IUsbBackend DefaultBackend()
         {
-            string? path = Adb.Locate(null, AdbInstaller.InstalledPath);
-            if (path == null)
+            // Test hook: LOGINRELAY_FAKE_PHONE=host:port means "one phone is plugged in" without touching libusb.
+            string? fake = Environment.GetEnvironmentVariable("LOGINRELAY_FAKE_PHONE");
+            string host;
+            int port;
+            if (TcpPhoneBackend.TryParse(fake, out host, out port))
             {
-                return false;
+                return new TcpPhoneBackend(host, port);
             }
-            Adb.Exec(path, new[] { "kill-server" }, 10);
-            return true;
+            return new LibUsbBackend();
         }
 
-        // ---- switching and choosing ---------------------------------------------------------------
-
-        /// <summary>Switches between adb and USB accessory mode.</summary>
-        public void SetTransport(TransportKind kind)
-        {
-            if (kind == _prefs.Transport)
-            {
-                return;
-            }
-            CancelActive("Switching connection type.", true);
-            IPhoneConnection? link = _currentLink;
-            if (link != null)
-            {
-                link.Close();
-            }
-            // Forget the old link now. Its "closed" notice arrives later and must not be mistaken for the
-            // new connection's: a stale USB close would otherwise clear the phone app's version that the
-            // adb check just found.
-            _currentLink = null;
-            CancelDelivery();
-            _prefs.Transport = kind;
-            AdbTool = null;
-            Devices = new List<Device>();
-            Phone = null;
-            PhoneVersion = null;
-            Linked = false;
-            UsbCandidates = new List<UsbDevice>();
-            UsbAlive = false;
-            _usbEverAlive = false;
-            UsbDetail = "";
-            UsbSetup = null;
-            Log(kind == TransportKind.Usb
-                ? "Connecting over USB accessory mode (no USB debugging needed)."
-                : "Connecting over adb.");
-            StartLoop();
-            RaiseChanged();
-        }
+        // ---- choosing -----------------------------------------------------------------------------
 
         public void SelectUsb(string id)
         {
@@ -141,20 +100,24 @@ namespace LoginRelay.Core
 
         // ---- UI-thread publishing -----------------------------------------------------------------
 
-        private void ApplyUsb(Device? phone, IReadOnlyList<UsbDevice> candidates, string detail, UsbSetupInfo? setup)
+        private void ApplyUsb(Device? phone, IReadOnlyList<UsbDevice> candidates, string detail, bool cantOpen)
         {
             bool changed = Phone != phone
                 || !UsbCandidates.SequenceEqual(candidates)
                 || UsbDetail != detail
-                || !Equals(UsbSetup, setup);
+                || UsbCantOpen != cantOpen;
             if (Phone != phone)
             {
                 Log(phone != null ? "USB phone: " + phone.Title : "No USB phone.");
             }
+            if (cantOpen && !UsbCantOpen)
+            {
+                Log("Login Relay can't open the phone over USB (no WinUSB driver for it, or no access).");
+            }
             Phone = phone;
             UsbCandidates = candidates;
             UsbDetail = detail;
-            UsbSetup = setup;
+            UsbCantOpen = cantOpen;
             if (changed)
             {
                 RaiseChanged();
@@ -179,18 +142,14 @@ namespace LoginRelay.Core
             Log(alive
                 ? "Login Relay on the phone is answering."
                 : "Login Relay on the phone went idle (it starts again by itself when an app asks to sign in).");
-            if (!alive)
+            if (!alive && Active != null)
             {
-                PhoneVersion = null;
-                if (Active != null)
-                {
-                    CancelActive("Login Relay on the phone stopped answering.", false);
-                }
+                CancelActive("Login Relay on the phone stopped answering.", false);
             }
             RaiseChanged();
         }
 
-        // ---- delivery without adb -----------------------------------------------------------------
+        // ---- delivery -----------------------------------------------------------------------------
 
         private void SendCallbackOverUsb(Flow flow, string callback)
         {
@@ -268,34 +227,22 @@ namespace LoginRelay.Core
 
         // ---- wording ------------------------------------------------------------------------------
 
-        private (string, string) DescribeUsbNoPhone(bool brief)
+        private (string, string) DescribeUsbNoPhone()
         {
-            UsbSetupInfo? setup = UsbSetup;
-            if (setup != null && setup.IsDriverProblem)
-            {
-                return (UsbSetupText.Headline(setup)!, brief ? UsbSetupText.Summary(setup) : UsbSetupText.Steps(setup));
-            }
             if (UsbDetail.Length > 0)
             {
-                return ("No phone found over USB", UsbDetail);
+                return (UsbText.NoPhoneHeadline, UsbDetail);
             }
-            return ("No phone found over USB",
-                "Plug the phone in and choose “File transfer” in its USB notification. USB debugging isn't needed."
-                + " If Windows doesn't see it yet, choose “" + UsbSetupText.SetupMenuName + "” in the tray menu.");
+            return (UsbText.NoPhoneHeadline, UsbText.NoPhoneDetail);
         }
 
-        private (string, string) DescribeUsbConnecting(PhaseInfo phase, bool brief)
+        private (string, string) DescribeUsbConnecting(PhaseInfo phase)
         {
             Device d = phase.Phone!;
-            UsbSetupInfo? setup = UsbSetup;
-            if (setup != null && setup.State == UsbSetupState.NeedsAccessoryDriver)
-            {
-                return ("Connecting to " + d.Title + "…", brief ? UsbSetupText.Summary(setup) : UsbSetupText.Steps(setup));
-            }
             // Once the USB pipe is open the phone is plugged in and connected; it's just not answering yet.
             string headline = Linked ? d.Title + " is connected over USB" : "Connecting to " + d.Title + "…";
             string detail = phase.Detail.Length == 0 ? "Waiting for the phone." : phase.Detail;
-            return (headline, detail + " Not working? Choose “" + UsbSetupText.SetupMenuName + "” in the tray menu.");
+            return (headline, detail);
         }
 
         // ---- the background loop ------------------------------------------------------------------
@@ -305,13 +252,13 @@ namespace LoginRelay.Core
             return !_stopping && gen == Volatile.Read(ref _generation);
         }
 
-        private void PublishUsb(int gen, Device? phone, IReadOnlyList<UsbDevice> candidates, string detail, UsbSetupInfo? setup)
+        private void PublishUsb(int gen, Device? phone, IReadOnlyList<UsbDevice> candidates, string detail, bool cantOpen = false)
         {
             _ui.Post(() =>
             {
                 if (gen == Volatile.Read(ref _generation))
                 {
-                    ApplyUsb(phone, candidates, detail, setup);
+                    ApplyUsb(phone, candidates, detail, cantOpen);
                 }
             });
         }
@@ -336,11 +283,7 @@ namespace LoginRelay.Core
         {
             IUsbBackend? backend = null;
             var limiter = new SwitchLimiter(UsbSwitchInterval);
-            var noWindows = new List<PnpDevice>();
-            IReadOnlyList<PnpDevice> windows = noWindows;
-            DateTime lastDiagnostics = DateTime.MinValue;
             string? lastError = null;
-            bool diagnosticsFailed = false;
 
             try
             {
@@ -350,10 +293,8 @@ namespace LoginRelay.Core
                     try
                     {
                         Tick();
-                        bool force;
                         lock (_stateLock)
                         {
-                            force = _forceCheck;
                             _forceCheck = false;
                         }
 
@@ -377,37 +318,23 @@ namespace LoginRelay.Core
                             }
                         }
 
-                        IUsbDiagnostics? diagnostics = UsbDiagnostics;
                         if (target == null)
                         {
-                            // Nothing usable: ask Windows what it sees, so we can tell the user which driver step is next.
-                            if (diagnostics != null && (force || DateTime.UtcNow - lastDiagnostics >= UsbDiagnosticsInterval))
-                            {
-                                lastDiagnostics = DateTime.UtcNow;
-                                try
-                                {
-                                    windows = diagnostics.QueryUsbDevices();
-                                    diagnosticsFailed = false;
-                                }
-                                catch (Exception ex)
-                                {
-                                    windows = noWindows;
-                                    if (!diagnosticsFailed)
-                                    {
-                                        diagnosticsFailed = true;
-                                        LogAsync("Couldn't ask Windows about USB devices: " + ex.Message);
-                                    }
-                                }
-                                Tick();
-                            }
-                            UsbSetupInfo none = UsbDiagnosisLogic.Diagnose(all, windows);
-                            PublishUsb(gen, null, candidates, candidates.Count > 1 ? "Choose which phone to use from the menu." : "", none);
+                            // A phone (or its accessory-mode device) that libusb lists but can't open: Windows has
+                            // no WinUSB driver for it. Say so plainly instead of "no phone".
+                            bool blocked = candidates.Count == 0
+                                && all.Any(d => !d.Openable
+                                    && (d.IsAccessory
+                                        || (d.LooksAndroid && !UsbHeuristics.IsDownloadMode(d.VendorId, d.ProductId))));
+                            PublishUsb(
+                                gen, null, candidates,
+                                candidates.Count > 1 ? "Choose which phone to use from the menu." : "",
+                                blocked);
                             _wake.WaitOne(RetryDelay);
                             continue;
                         }
 
-                        UsbSetupInfo ready = UsbDiagnosisLogic.Diagnose(all, noWindows);
-                        var phone = new Device("usb:" + target.Id, "device", target.Name.Replace(' ', '_'));
+                        var phone = new Device("usb:" + target.Id, target.Name);
                         string openLocation = target.Location;
 
                         if (!target.IsAccessory)
@@ -417,7 +344,7 @@ namespace LoginRelay.Core
                                 _wake.WaitOne(RetryDelay);
                                 continue;
                             }
-                            PublishUsb(gen, phone, candidates, "Asking " + target.Name + " to switch to USB accessory mode…", ready);
+                            PublishUsb(gen, phone, candidates, "Asking " + target.Name + " to switch to USB accessory mode…");
                             UsbSwitchResult r = backend.SwitchToAccessory(target.Location, HostName);
                             if (r.Code == UsbCode.Busy && StopAdbServerOnce())
                             {
@@ -426,13 +353,14 @@ namespace LoginRelay.Core
                             }
                             if (r.Code != UsbCode.Ok)
                             {
-                                UsbSetupInfo? failSetup = r.Code == UsbCode.NoDriver
-                                    ? new UsbSetupInfo(UsbSetupState.NeedsPhoneDriver, target.VendorId, target.ProductId, target.Name)
-                                    : (UsbSetupInfo?)null;
-                                string text = failSetup != null
-                                    ? UsbSetupText.Summary(failSetup)
-                                    : UsbText.ErrorText(r, target.Name);
-                                PublishUsb(gen, phone, candidates, text, failSetup);
+                                if (UsbText.IsCantOpen(r.Code))
+                                {
+                                    PublishUsb(gen, phone, candidates, UsbText.ErrorText(r, target.Name), true);
+                                }
+                                else
+                                {
+                                    PublishUsb(gen, phone, candidates, UsbText.ErrorText(r, target.Name));
+                                }
                                 _wake.WaitOne(TimeSpan.FromSeconds(3));
                                 continue;
                             }
@@ -458,28 +386,14 @@ namespace LoginRelay.Core
                             }
                             if (appeared == null || !appeared.Openable)
                             {
-                                // Listed but not usable, or not listed at all: ask Windows whether it has the accessory device.
-                                if (diagnostics != null)
+                                if (appeared != null)
                                 {
-                                    try
-                                    {
-                                        windows = diagnostics.QueryUsbDevices();
-                                        lastDiagnostics = DateTime.UtcNow;
-                                    }
-                                    catch (Exception)
-                                    {
-                                        windows = noWindows;
-                                    }
-                                    Tick();
-                                }
-                                UsbSetupInfo diagnosis = UsbDiagnosisLogic.Diagnose(after, windows);
-                                if (diagnosis.State == UsbSetupState.NeedsAccessoryDriver)
-                                {
-                                    PublishUsb(gen, phone, candidates, UsbSetupText.Summary(diagnosis), diagnosis);
+                                    // The accessory device is there but libusb can't open it: no WinUSB driver for it.
+                                    PublishUsb(gen, phone, candidates, UsbText.CantOpenDetail, true);
                                 }
                                 else
                                 {
-                                    PublishUsb(gen, phone, candidates, "The phone didn't switch to accessory mode.", ready);
+                                    PublishUsb(gen, phone, candidates, "The phone didn't switch to accessory mode.");
                                 }
                                 continue;
                             }
@@ -502,7 +416,7 @@ namespace LoginRelay.Core
                             catch (UsbException ex)
                             {
                                 openError = ex;
-                                if (ex.Code == UsbCode.NoDriver)
+                                if (ex.Code == UsbCode.NoDriver || ex.Code == UsbCode.Permission)
                                 {
                                     break;
                                 }
@@ -511,18 +425,15 @@ namespace LoginRelay.Core
                         }
                         if (conn == null)
                         {
-                            if (openError != null && openError.Code == UsbCode.NoDriver)
+                            int code = openError != null ? openError.Code : UsbCode.Open;
+                            if (openError != null && (code == UsbCode.NoDriver || code == UsbCode.Permission))
                             {
-                                var needs = new UsbSetupInfo(
-                                    UsbSetupState.NeedsAccessoryDriver, target.VendorId, target.ProductId,
-                                    UsbDiagnosisLogic.AccessoryName, openError.Detail);
-                                PublishUsb(gen, phone, candidates, UsbSetupText.Summary(needs), needs);
+                                PublishUsb(gen, phone, candidates, UsbText.CantOpenDetail, true);
                             }
                             else
                             {
-                                int code = openError != null ? openError.Code : UsbCode.Open;
                                 string more = openError != null && openError.Detail.Length > 0 ? ": " + openError.Detail : "";
-                                PublishUsb(gen, phone, candidates, "Couldn't open the accessory connection (error " + code + more + ").", ready);
+                                PublishUsb(gen, phone, candidates, "Couldn't open the accessory connection (error " + code + more + ").");
                             }
                             _wake.WaitOne(TimeSpan.FromSeconds(3));
                             continue;
@@ -539,8 +450,7 @@ namespace LoginRelay.Core
                         };
                         PublishUsb(
                             gen, phone, candidates,
-                            "Login Relay on the phone isn't answering yet. If Android asks to allow USB access, tap OK; otherwise just start a sign-in on the phone and Login Relay starts by itself.",
-                            ready);
+                            "Login Relay on the phone isn't answering yet. If Android asks to allow USB access, tap OK; otherwise just start a sign-in on the phone and Login Relay starts by itself.");
                         _ui.Post(() => LinkOpened(link));
                         link.Start();
                         while (!closed.Wait(CheckInterval))
@@ -573,7 +483,7 @@ namespace LoginRelay.Core
                     catch (UsbException ex)
                     {
                         string text = UsbText.ErrorText(new UsbSwitchResult(ex.Code, 0, ex.Detail), "the phone");
-                        PublishUsb(gen, null, new List<UsbDevice>(), text, null);
+                        PublishUsb(gen, null, new List<UsbDevice>(), text);
                         if (text != lastError)
                         {
                             lastError = text;
@@ -619,12 +529,17 @@ namespace LoginRelay.Core
             }
         }
 
+        /// <summary>Stops the adb server if there is one. Silent when there isn't.</summary>
         private bool StopAdbServerOnce()
         {
             try
             {
-                LogAsync("Another program has the phone open, probably the adb server. Stopping it (it restarts when needed).");
-                return StopAdbServer();
+                bool stopped = StopAdbServer();
+                if (stopped)
+                {
+                    LogAsync("Another program had the phone open, probably the adb server. Stopped it (it restarts when needed).");
+                }
+                return stopped;
             }
             catch (Exception)
             {

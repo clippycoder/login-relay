@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusRow.attributedTitle = head
         statusRow.isEnabled = false
         menu.addItem(statusRow)
-        if !good, engine.busy == nil {
+        if !good {
             let hint = NSMenuItem(title: detail, action: nil, keyEquivalent: "")
             hint.isEnabled = false
             hint.attributedTitle = NSAttributedString(string: detail, attributes: [
@@ -134,50 +134,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        if engine.busy == nil {
-            switch engine.phase {
-            case .noAdb:
-                menu.addItem(item("Download Android Platform-Tools…", #selector(downloadPlatformTools)))
-                menu.addItem(item("Choose adb…", #selector(pickAdb)))
-            case .needsApp:
-                if engine.bundledAPK != nil { menu.addItem(item("Install Login Relay on Phone", #selector(installOnPhone))) }
-            case .ready:
-                if engine.transport == .adb {
-                    menu.addItem(item("Open Login Relay on Phone", #selector(openOnPhone)))
-                    if engine.phoneAppIsOutdated, let have = engine.phoneVersion, let new = engine.bundledPhoneVersion {
-                        menu.addItem(item("Update Login Relay on Phone (\(have) → \(new))", #selector(installOnPhone)))
-                    }
-                }
-            case .working(let flow):
-                menu.addItem(item("Cancel \(flow.request.verb)", #selector(cancelFlow)))
-            case .noPhone, .unauthorized, .connecting:
-                menu.addItem(item("Check Again", #selector(checkAgain)))
-            }
+        switch engine.phase {
+        case .working(let flow):
+            menu.addItem(item("Cancel \(flow.request.verb)", #selector(cancelFlow)))
+        case .noPhone, .connecting:
+            menu.addItem(item("Check Again", #selector(checkAgain)))
+        case .ready:
+            break
         }
 
-        let usbPhones = engine.transport == .usb ? engine.usbCandidates : []
-        if usbPhones.count > 1 {
+        if engine.usbCandidates.count > 1 {
             let sub = NSMenu()
-            for p in usbPhones {
+            for p in engine.usbCandidates {
                 let it = NSMenuItem(title: p.name.isEmpty ? p.id : p.name, action: #selector(selectUsbPhone(_:)), keyEquivalent: "")
                 it.target = self
                 it.representedObject = p.id
-                it.state = ("usb:" + p.id) == engine.device?.serial ? .on : .off
-                sub.addItem(it)
-            }
-            let parent = NSMenuItem(title: "Phone", action: nil, keyEquivalent: "")
-            parent.submenu = sub
-            menu.addItem(parent)
-        }
-
-        let usable = engine.devices.filter { $0.isUsable }
-        if usable.count > 1 {
-            let sub = NSMenu()
-            for d in usable {
-                let it = NSMenuItem(title: "\(d.title) (\(d.serial))", action: #selector(selectPhone(_:)), keyEquivalent: "")
-                it.target = self
-                it.representedObject = d.serial
-                it.state = d == engine.device ? .on : .off
+                it.state = ("usb:" + p.id) == engine.device?.id ? .on : .off
                 sub.addItem(it)
             }
             let parent = NSMenuItem(title: "Phone", action: nil, keyEquivalent: "")
@@ -185,18 +157,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(parent)
         }
         if menu.items.last?.isSeparatorItem == false { menu.addItem(.separator()) }
-
-        let connectMenu = NSMenu()
-        for (t, title) in [(Transport.adb, "adb (needs USB debugging)"), (Transport.usb, "USB accessory (no USB debugging) — beta")] {
-            let it = NSMenuItem(title: title, action: #selector(chooseTransport(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = t.rawValue
-            it.state = engine.transport == t ? .on : .off
-            connectMenu.addItem(it)
-        }
-        let connectParent = NSMenuItem(title: "Connect Over", action: nil, keyEquivalent: "")
-        connectParent.submenu = connectMenu
-        menu.addItem(connectParent)
 
         menu.addItem(item("Show Activity…", #selector(showWindow)))
         menu.addItem(.separator())
@@ -227,45 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: actions
 
     @objc private func showWindow() { window.show() }
-    @objc private func installOnPhone() { engine.installPhoneApp() }
-    @objc private func openOnPhone() { engine.openOnPhone() }
     @objc private func checkAgain() { engine.checkAgain() }
     @objc private func cancelFlow() { engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }
-    @objc private func downloadPlatformTools() { confirmDownloadPlatformTools() }
-    @objc private func pickAdb() { chooseAdb() }
-    @objc private func chooseTransport(_ sender: NSMenuItem) {
-        if let raw = sender.representedObject as? String, let t = Transport(rawValue: raw) { engine.setTransport(t) }
-    }
     @objc private func selectUsbPhone(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { engine.selectUsb(id) }
-    }
-    @objc private func selectPhone(_ sender: NSMenuItem) {
-        if let serial = sender.representedObject as? String { engine.selectDevice(serial) }
-    }
-
-    func confirmDownloadPlatformTools() {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Download Android platform-tools?"
-        alert.informativeText = "This downloads Google's platform-tools (which include adb) directly from dl.google.com, checks them against Google's published checksum, and keeps them in Login Relay's own folder. They're covered by the Android SDK License."
-        alert.addButton(withTitle: "Download")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "View License")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: engine.downloadPlatformTools()
-        case .alertThirdButtonReturn: NSWorkspace.shared.open(AdbInstaller.licenseURL)
-        default: break
-        }
-    }
-
-    func chooseAdb() {
-        NSApp.activate(ignoringOtherApps: true)
-        let panel = NSOpenPanel()
-        panel.message = "Choose the adb program"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
-        if panel.runModal() == .OK, let url = panel.url { engine.chooseAdb(path: url.path) }
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -292,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func about() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [
-            .credits: NSAttributedString(string: "Finishes browser sign-ins for Android phones that have no browser, using this Mac's browser over adb.\n\nGPL-3.0-or-later",
+            .credits: NSAttributedString(string: "Finishes browser sign-ins for Android phones that have no browser, using this Mac's browser. The phone connects over USB; USB debugging isn't needed.\n\nGPL-3.0-or-later",
                                          attributes: [.font: NSFont.systemFont(ofSize: 11)]),
         ])
     }

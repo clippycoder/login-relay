@@ -102,9 +102,7 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
 python3 -c 'import gi' 2>/dev/null \
   || echo "note: PyGObject isn't installed (Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1)" >&2
 python3 -c 'import usb.core' 2>/dev/null \
-  || echo "note: pyusb isn't installed, so USB accessory mode won't work (Debian/Ubuntu: sudo apt install python3-usb)." >&2
-command -v adb >/dev/null 2>&1 \
-  || echo "note: adb isn't installed; Login Relay can download Google's platform-tools for you from its menu." >&2
+  || echo "note: pyusb isn't installed, so Login Relay won't be able to reach the phone (Debian/Ubuntu: sudo apt install python3-usb)." >&2
 
 rm -rf "$lib" "$share"
 mkdir -p "$lib/loginrelay" "$share" "$(dirname "$bin")" "$apps"
@@ -137,9 +135,9 @@ refresh
 
 echo "Installed to $PREFIX. Start it from your applications menu or run: $bin"
 echo
-echo "USB accessory mode (connecting over a plain USB cable, no USB debugging) needs access to the phone's"
-echo "USB device. A per-user install can't grant that; without it Login Relay reports a permission error"
-echo "in that mode (adb mode is not affected). To allow it, run these two commands once, as root:"
+echo "Login Relay talks to the phone over a plain USB cable (USB accessory mode, no USB debugging) and needs"
+echo "access to the phone's USB device. A per-user install can't grant that; without it Login Relay reports"
+echo "a permission error. To allow it, run these two commands once, as root:"
 echo
 echo "  sudo install -m 644 $(q "$share/70-loginrelay.rules") /etc/udev/rules.d/70-loginrelay.rules"
 echo "  sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=usb"

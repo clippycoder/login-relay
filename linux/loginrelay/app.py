@@ -38,12 +38,12 @@ for _ns in ("AyatanaAppIndicator3", "AppIndicator3"):
         INDICATOR_PROBLEM = str(_e)
         AppIndicator = None
 
-from . import APP_ID, VERSION, claim, installer  # noqa: E402
+from . import APP_ID, VERSION, claim  # noqa: E402
 from . import engine as eng  # noqa: E402
 from .prefs import Prefs, find_share_file, share_dirs  # noqa: E402
 
 COMMENTS = ("Finishes browser sign-ins for Android phones that have no browser, using this computer's "
-            "browser over adb or a plain USB connection.\n\nGPL-3.0-or-later")
+            "browser over a plain USB connection (no USB debugging needed).\n\nGPL-3.0-or-later")
 
 
 # ---- small helpers ---------------------------------------------------------------------------
@@ -250,12 +250,11 @@ class ActivityWindow:
         self._actions = [None, None]
         outer.pack_start(buttons, False, False, 0)
 
-        # "Connect over" (adb or USB accessory) and, in USB mode with several phones, "Phone".
+        # "Phone" drop-down, shown only when several phones are plugged in.
         self._choosers = {}
         self._entries = {}
         self._updating = False
         choosers = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._add_chooser(choosers, "transport", "Connect over:")
         self._add_chooser(choosers, "usbphone", "Phone:")
         outer.pack_start(choosers, False, False, 0)
 
@@ -344,14 +343,12 @@ class ActivityWindow:
         status, detail = eng.describe(engine)
         self.status.set_markup('<span size="large" weight="bold">%s</span>' % GLib.markup_escape_text(status))
         self.detail.set_text(detail)
-        primary, secondary, enabled = eng.window_actions(engine)
+        primary, secondary = eng.window_actions(engine)
         for i, (button, spec) in enumerate(((self.primary, primary), (self.secondary, secondary))):
             self._actions[i] = spec[1] if spec else None
             button.set_visible(spec is not None)
             if spec:
                 button.set_label(spec[0])
-            button.set_sensitive(enabled if i == 0 else True)
-        self._fill_chooser("transport", eng.transport_choices(engine))
         self._fill_chooser("usbphone", eng.usb_phone_choices(engine))
         if self.win.get_visible():
             text = "\n".join("%s  %s" % (ts.strftime("%H:%M:%S"), t) for ts, t in engine.log_lines)
@@ -424,8 +421,7 @@ class LoginRelayApp(Gtk.Application):
                 theme.append_search_path(icons)
 
         self.prefs = Prefs()
-        apk, version = eng.find_bundled()
-        self.engine = eng.RelayEngine(GtkHost(self), self.prefs, bundled_apk=apk, bundled_phone_version=version)
+        self.engine = eng.RelayEngine(GtkHost(self), self.prefs)
         self.engine.verbose = verbose
         self._install_log_file()
         try:
@@ -568,15 +564,7 @@ class LoginRelayApp(Gtk.Application):
 
     def run_action(self, action: str, arg: str = "") -> None:
         e = self.engine
-        if action == eng.A_DOWNLOAD:
-            self.confirm_download_platform_tools()
-        elif action == eng.A_CHOOSE_ADB:
-            self.choose_adb()
-        elif action == eng.A_INSTALL:
-            e.install_phone_app()
-        elif action == eng.A_OPEN:
-            e.open_on_phone()
-        elif action == eng.A_CANCEL:
+        if action == eng.A_CANCEL:
             e.cancel_active("Cancelled on the computer.", notify_phone=True)
         elif action == eng.A_CHECK:
             e.check_again()
@@ -590,49 +578,8 @@ class LoginRelayApp(Gtk.Application):
             self.about()
         elif action == eng.A_QUIT:
             self.quit()
-        elif action == eng.A_SELECT_PHONE:
-            e.select_device(arg)
         elif action == eng.A_SELECT_USB:
             e.select_usb(arg)
-        elif action == eng.A_SET_TRANSPORT:
-            e.set_transport(arg)
-
-    def confirm_download_platform_tools(self) -> None:
-        dlg = _message_dialog(Gtk.MessageType.QUESTION, "Download Android platform-tools?",
-                              "This downloads Google's platform-tools (which include adb) directly from "
-                              "dl.google.com, checks them against Google's published checksum, and keeps them in "
-                              "Login Relay's own folder. They're covered by the Android SDK License.")
-        dlg.add_button("Download", Gtk.ResponseType.OK)
-        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dlg.add_button("View License", Gtk.ResponseType.HELP)
-
-        def on_response(d, response):
-            d.destroy()
-            if response == Gtk.ResponseType.OK:
-                self.engine.download_platform_tools()
-            elif response == Gtk.ResponseType.HELP:
-                open_in_browser(installer.LICENSE_URL)
-
-        dlg.connect("response", on_response)
-        dlg.show_all()
-        dlg.present()
-
-    def choose_adb(self) -> None:
-        dlg = Gtk.FileChooserDialog(title="Choose the adb program", action=Gtk.FileChooserAction.OPEN)
-        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dlg.add_button("Open", Gtk.ResponseType.OK)
-        dlg.set_current_folder(os.path.expanduser("~"))
-        dlg.set_keep_above(True)
-
-        def on_response(d, response):
-            path = d.get_filename() if response == Gtk.ResponseType.OK else None
-            d.destroy()
-            if path:
-                self.engine.choose_adb(path)
-
-        dlg.connect("response", on_response)
-        dlg.show_all()
-        dlg.present()
 
     def toggle_launch_at_login(self) -> None:
         enable = not claim.autostart_enabled()

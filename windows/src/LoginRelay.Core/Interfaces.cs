@@ -55,11 +55,5 @@ namespace LoginRelay.Core
         /// if the user gives up. The dialog must not block the UI thread's message loop.
         /// </summary>
         IPromptHandle AskForPastedAddress(string startsWith, Func<string, string?> check, Action onCancel);
-
-        /// <summary>Path of the bundled login-relay.apk, if there is one.</summary>
-        string? BundledApkPath { get; }
-
-        /// <summary>Version of the phone app inside that apk, if known.</summary>
-        string? BundledPhoneVersion { get; }
     }
 }

@@ -51,7 +51,6 @@ namespace LoginRelay.App
         private readonly NotifyIcon _tray;
         private readonly ContextMenuStrip _menu = new ContextMenuStrip();
         private readonly ActivityForm _window;
-        private readonly UsbSetupForm _usbSetup;
         private readonly Icon _iconReady;
         private readonly Icon _iconOff;
         private readonly Icon _iconActive;
@@ -89,9 +88,7 @@ namespace LoginRelay.App
             _platform = new WindowsPlatform(_tray);
             _engine = new RelayEngine(_ui, _platform, _prefs);
             _engine.LogSink = Program.WriteLog;
-            _engine.UsbDiagnostics = new WmiUsbDiagnostics();
-            _usbSetup = new UsbSetupForm(_engine, appIcon, _platform.OpenUrl);
-            _window = new ActivityForm(_engine, appIcon, ConfirmDownloadPlatformTools, ChooseAdb, () => _usbSetup.ShowWindow());
+            _window = new ActivityForm(_engine, appIcon);
             _engine.Changed += OnEngineChanged;
 
             // A crash in the middle of a login can leave a return scheme claimed; undo that first.
@@ -161,7 +158,6 @@ namespace LoginRelay.App
         {
             UpdateIcon();
             _window.UpdateView();
-            _usbSetup.UpdateView();
         }
 
         private void UpdateIcon()
@@ -188,14 +184,14 @@ namespace LoginRelay.App
                 item.Dispose();
             }
 
-            (string status, string detail) = _engine.Describe(true);
+            (string status, string detail) = _engine.Describe();
             PhaseInfo phase = _engine.Phase;
             bool good = phase.Kind == PhaseKind.Ready || phase.Kind == PhaseKind.Working;
 
             var head = new ToolStripLabel("●  " + status);
             head.Font = _boldFont;
             _menu.Items.Add(head);
-            if (!good && _engine.Busy == null)
+            if (!good)
             {
                 var hintLabel = new Label();
                 hintLabel.Text = detail;
@@ -207,44 +203,17 @@ namespace LoginRelay.App
             }
             _menu.Items.Add(new ToolStripSeparator());
 
-            if (_engine.Busy == null)
+            if (phase.Kind == PhaseKind.Working)
             {
-                switch (phase.Kind)
-                {
-                    case PhaseKind.NoAdb:
-                        AddItem("Download Android Platform-Tools…", ConfirmDownloadPlatformTools);
-                        AddItem("Choose adb…", ChooseAdb);
-                        break;
-                    case PhaseKind.NeedsApp:
-                        if (_engine.BundledApk != null)
-                        {
-                            AddItem("Install Login Relay on Phone", _engine.InstallPhoneApp);
-                        }
-                        break;
-                    case PhaseKind.Ready:
-                        // Opening and updating the phone app go through adb, so they're for the adb connection only.
-                        if (_engine.Transport == TransportKind.Adb)
-                        {
-                            AddItem("Open Login Relay on Phone", _engine.OpenOnPhone);
-                            if (_engine.PhoneAppIsOutdated && _engine.PhoneVersion != null && _engine.BundledPhoneVersion != null)
-                            {
-                                AddItem(
-                                    "Update Login Relay on Phone (" + _engine.PhoneVersion + " → " + _engine.BundledPhoneVersion + ")",
-                                    _engine.InstallPhoneApp);
-                            }
-                        }
-                        break;
-                    case PhaseKind.Working:
-                        string verb = phase.Flow != null ? phase.Flow.Request.Verb : "login";
-                        AddItem("Cancel " + verb, () => _engine.CancelActive("Cancelled on the computer.", true));
-                        break;
-                    default:
-                        AddItem("Check Again", _engine.CheckAgain);
-                        break;
-                }
+                string verb = phase.Flow != null ? phase.Flow.Request.Verb : "login";
+                AddItem("Cancel " + verb, () => _engine.CancelActive("Cancelled on the computer.", true));
+            }
+            else if (phase.Kind != PhaseKind.Ready)
+            {
+                AddItem("Check Again", _engine.CheckAgain);
             }
 
-            if (_engine.Transport == TransportKind.Usb && _engine.UsbCandidates.Count > 1)
+            if (_engine.UsbCandidates.Count > 1)
             {
                 var usbParent = new ToolStripMenuItem("Phone");
                 foreach (UsbDevice candidate in _engine.UsbCandidates)
@@ -257,43 +226,9 @@ namespace LoginRelay.App
                 }
                 _menu.Items.Add(usbParent);
             }
-
-            List<Device> usable = _engine.Devices.Where(d => d.IsUsable).ToList();
-            if (usable.Count > 1)
-            {
-                var parent = new ToolStripMenuItem("Phone");
-                foreach (Device device in usable)
-                {
-                    string serial = device.Serial;
-                    var entry = new ToolStripMenuItem(device.Title + " (" + serial + ")");
-                    entry.Checked = _engine.Phone != null && _engine.Phone.Serial == serial;
-                    entry.Click += (sender, args) => SafeRun(() => _engine.SelectDevice(serial));
-                    parent.DropDownItems.Add(entry);
-                }
-                _menu.Items.Add(parent);
-            }
             if (_menu.Items.Count > 0 && !(_menu.Items[_menu.Items.Count - 1] is ToolStripSeparator))
             {
                 _menu.Items.Add(new ToolStripSeparator());
-            }
-
-            var connectParent = new ToolStripMenuItem("Connect Over");
-            foreach (KeyValuePair<TransportKind, string> choice in new[]
-            {
-                new KeyValuePair<TransportKind, string>(TransportKind.Adb, "adb (needs USB debugging)"),
-                new KeyValuePair<TransportKind, string>(TransportKind.Usb, "USB accessory (no USB debugging) — beta"),
-            })
-            {
-                TransportKind kind = choice.Key;
-                var entry = new ToolStripMenuItem(choice.Value);
-                entry.Checked = _engine.Transport == kind;
-                entry.Click += (sender, args) => SafeRun(() => _engine.SetTransport(kind));
-                connectParent.DropDownItems.Add(entry);
-            }
-            _menu.Items.Add(connectParent);
-            if (_engine.Transport == TransportKind.Usb)
-            {
-                AddItem(UsbSetupText.SetupMenuName, () => _usbSetup.ShowWindow());
             }
 
             AddItem("Show Activity…", () => _window.ShowWindow());
@@ -331,39 +266,6 @@ namespace LoginRelay.App
 
         // ---- actions --------------------------------------------------------------------------------
 
-        private void ConfirmDownloadPlatformTools()
-        {
-            int choice = Dialogs.Choose(
-                "Download Android platform-tools?",
-                "This downloads Google's platform-tools (which include adb) directly from dl.google.com, checks them against Google's published checksum, and keeps them in Login Relay's own folder. They're covered by the Android SDK License.",
-                "Download",
-                "Cancel",
-                "View License");
-            if (choice == 0)
-            {
-                _engine.DownloadPlatformTools();
-            }
-            else if (choice == 2)
-            {
-                _platform.OpenUrl(AdbInstaller.LicenseUrl);
-            }
-        }
-
-        private void ChooseAdb()
-        {
-            using (var dialog = new OpenFileDialog())
-            {
-                dialog.Title = "Choose the adb program";
-                dialog.Filter = "adb (adb.exe)|adb.exe|Programs (*.exe)|*.exe|All files (*.*)|*.*";
-                dialog.CheckFileExists = true;
-                dialog.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                if (dialog.ShowDialog() == DialogResult.OK)
-                {
-                    _engine.ChooseAdb(dialog.FileName);
-                }
-            }
-        }
-
         private void ToggleLaunchAtLogin()
         {
             try
@@ -389,7 +291,7 @@ namespace LoginRelay.App
         {
             MessageBox.Show(
                 "Login Relay " + Application.ProductVersion
-                    + "\n\nFinishes browser sign-ins for Android phones that have no browser, using this computer's browser over adb."
+                    + "\n\nFinishes browser sign-ins for Android phones that have no browser, using this computer's browser over USB."
                     + "\n\nGPL-3.0-or-later",
                 "About Login Relay",
                 MessageBoxButtons.OK,

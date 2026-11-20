@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
-/// What the engine needs from a connection to the phone, whichever way it's wired.
-protocol PhoneConnection: AnyObject {
-    func send(_ object: [String: Any])
-    func close()
+/// A phone as the engine sees it: a USB device, or the fake one the test hook provides.
+struct Device: Equatable {
+    /// "usb:<location>" for a real phone.
+    let id: String
+    let title: String
 }
-
-extension PhoneLink: PhoneConnection {}
 
 struct UsbDevice: Equatable {
     let vendorID: UInt16
@@ -24,8 +23,32 @@ struct UsbDevice: Equatable {
 }
 
 enum Usb {
-    /// kIOReturnExclusiveAccess: another program (usually the adb server) has the device open.
+    /// kIOReturnExclusiveAccess: another program has the device open.
     static let exclusiveAccess: UInt32 = 0xe00002c5
+
+    /// Best effort, silent if there's nothing to do. An Android Debug Bridge server that happens to be running
+    /// on this Mac holds a phone exclusively, which blocks the accessory switch (kIOReturnExclusiveAccess).
+    /// Stopping it is harmless: it starts again the next time something needs it. Looks for the tool in PATH
+    /// and the usual install places; returns whether it ran one. Output is never read: the server forks a
+    /// daemon that inherits any pipe, so waiting for end-of-file could wait forever.
+    static func stopAdbServer() -> Bool {
+        var dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        dirs += ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/Library/Android/sdk/platform-tools"]
+        let fm = FileManager.default
+        guard let path = dirs.map({ $0 + "/adb" }).first(where: { fm.isExecutableFile(atPath: $0) }) else { return false }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = ["kill-server"]
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return false }
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
+        p.waitUntilExit()
+        killer.cancel()
+        return true
+    }
 
     static func list() -> [UsbDevice] {
         var infos = [aoa_info](repeating: aoa_info(), count: 64)
@@ -74,7 +97,7 @@ enum Usb {
         switch r.code {
         case Int32(AOA_ERR_UNSUPPORTED): return "\(name) doesn't answer the USB accessory protocol."
         case Int32(AOA_ERR_OPEN) where r.iokit == exclusiveAccess:
-            return "Another program has \(name) open (usually adb)."
+            return "Another program has \(name) open. Quit it (or unplug and replug the phone), then choose Check Again."
         case Int32(AOA_ERR_OPEN): return "Couldn't open \(name) over USB."
         case Int32(AOA_ERR_NOT_FOUND): return "\(name) disappeared."
         default: return "Couldn't switch \(name) to accessory mode (error \(r.code))."
@@ -82,90 +105,20 @@ enum Usb {
     }
 }
 
-/// The connection to the Login Relay app on the phone over a USB accessory pipe. Same line-delimited
-/// JSON as the adb link. Bulk USB has no "connection closed", so the link pings the phone and tracks
-/// whether anything has come back recently ("alive").
-final class UsbPhoneLink: PhoneConnection {
-    var onMessage: (([String: Any]) -> Void)?
-    var onClose: (() -> Void)?
-    /// Called on the read thread when the phone app starts or stops answering.
-    var onAlive: ((Bool) -> Void)?
-
-    private static let silence: TimeInterval = 8
+/// The accessory pipe (bulk IN/OUT) as a `ByteChannel`.
+final class AoaChannel: ByteChannel {
     private let conn: OpaquePointer
-    private let writeLock = NSLock()
-    private var closed = false          // guarded by writeLock
-    private let stopLock = NSLock()
-    private var stopping = false        // guarded by stopLock
+    let padsBulkPackets = true
 
     init(conn: OpaquePointer) { self.conn = conn }
 
-    func start() {
-        let t = Thread { [weak self] in self?.readLoop() }
-        t.name = "usb-link"
-        t.start()
+    func read(into buffer: UnsafeMutablePointer<UInt8>, capacity: Int, timeoutMs: Int) -> Int {
+        Int(aoa_read(conn, buffer, UInt32(capacity), UInt32(timeoutMs)))
     }
 
-    func send(_ object: [String: Any]) {
-        guard let json = try? JSONSerialization.data(withJSONObject: object) else { return }
-        let frame = usbFrame(json)
-        writeLock.lock()
-        defer { writeLock.unlock() }
-        if closed { return }
-        frame.withUnsafeBytes { raw in
-            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-            var offset = 0
-            while offset < frame.count {
-                let chunk = min(frame.count - offset, 16384)
-                // A timeout means the phone app isn't reading; drop the message. Liveness covers the rest.
-                if aoa_write(conn, base + offset, UInt32(chunk), 500) <= 0 { return }
-                offset += chunk
-            }
-        }
+    func write(_ bytes: UnsafePointer<UInt8>, count: Int) -> Bool {
+        aoa_write(conn, bytes, UInt32(count), 500) > 0
     }
 
-    /// Ends the link; the read thread notices within a fraction of a second.
-    func close() {
-        stopLock.lock(); stopping = true; stopLock.unlock()
-    }
-
-    private var isStopping: Bool {
-        stopLock.lock(); defer { stopLock.unlock() }
-        return stopping
-    }
-
-    private func readLoop() {
-        var buffer = [UInt8](repeating: 0, count: 16384)
-        var splitter = LineSplitter()
-        var lastHeard = Date.distantPast
-        var lastPing = Date.distantPast
-        var alive = false
-        defer {
-            writeLock.lock()
-            closed = true
-            aoa_close(conn)
-            writeLock.unlock()
-            onClose?()
-        }
-        while !isStopping {
-            let n = aoa_read(conn, &buffer, UInt32(buffer.count), 200)
-            if n < 0 { return }
-            if n > 0 {
-                lastHeard = Date()
-                guard let lines = splitter.feed(Data(buffer[0..<Int(n)])) else { return }
-                for line in lines {
-                    if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] { onMessage?(obj) }
-                }
-            }
-            if Date().timeIntervalSince(lastPing) > 2 {
-                send(["type": "ping"])
-                lastPing = Date()
-            }
-            let nowAlive = Date().timeIntervalSince(lastHeard) < UsbPhoneLink.silence
-            if nowAlive != alive {
-                alive = nowAlive
-                onAlive?(alive)
-            }
-        }
-    }
+    func close() { aoa_close(conn) }
 }

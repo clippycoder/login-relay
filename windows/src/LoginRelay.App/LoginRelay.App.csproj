@@ -27,13 +27,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\LoginRelay.Core\LoginRelay.Core.csproj" />
-    <!-- Windows' own view of the USB devices (WMI), for the USB driver guide. -->
-    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- libusb-1.0.dll (x64, LGPL-2.1-or-later, linked dynamically) goes next to LoginRelay.exe. build.ps1 fetches it
-         into windows\libs\ first; without it the app still builds, and USB mode says what is missing. -->
+         into windows\libs\ first; without it the app still builds, and says what is missing. -->
     <Content Include="..\..\libs\libusb-1.0.dll" Condition="Exists('..\..\libs\libusb-1.0.dll')" Link="libusb-1.0.dll"
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>

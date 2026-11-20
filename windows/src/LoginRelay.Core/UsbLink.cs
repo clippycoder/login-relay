@@ -21,8 +21,7 @@ namespace LoginRelay.Core
     }
 
     /// <summary>
-    /// The connection to Login Relay on the phone over a USB accessory pipe. Same line-delimited JSON as the
-    /// adb link. Bulk USB has no "connection closed", so the link pings the phone and tracks whether anything
+    /// The connection to Login Relay on the phone over a USB accessory pipe (line-delimited JSON). Bulk USB has no "connection closed", so the link pings the phone and tracks whether anything
     /// has come back recently ("alive"). Port of UsbPhoneLink in macos/Sources/Usb.swift.
     /// </summary>
     public sealed class UsbPhoneLink : IPhoneConnection

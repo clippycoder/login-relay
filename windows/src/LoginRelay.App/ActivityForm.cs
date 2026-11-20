@@ -14,9 +14,6 @@ namespace LoginRelay.App
     internal sealed class ActivityForm : Form
     {
         private readonly RelayEngine _engine;
-        private readonly Action _downloadPlatformTools;
-        private readonly Action _chooseAdb;
-        private readonly Action _openUsbSetup;
         private readonly Label _status = new Label();
         private readonly Label _detail = new Label();
         private readonly Button _primary = new Button();
@@ -26,12 +23,9 @@ namespace LoginRelay.App
         private Action? _secondaryAction;
         private string _shownLog = "";
 
-        public ActivityForm(RelayEngine engine, Icon appIcon, Action downloadPlatformTools, Action chooseAdb, Action openUsbSetup)
+        public ActivityForm(RelayEngine engine, Icon appIcon)
         {
             _engine = engine;
-            _downloadPlatformTools = downloadPlatformTools;
-            _chooseAdb = chooseAdb;
-            _openUsbSetup = openUsbSetup;
 
             Text = "Login Relay";
             Icon = appIcon;
@@ -164,39 +158,16 @@ namespace LoginRelay.App
             PhaseInfo phase = _engine.Phase;
             switch (phase.Kind)
             {
-                case PhaseKind.NoAdb:
-                    Offer(_primary, "Download Platform-Tools…", _downloadPlatformTools, true);
-                    Offer(_secondary, "Choose adb…", _chooseAdb, false);
-                    break;
-                case PhaseKind.NeedsApp:
-                    if (_engine.BundledApk != null)
-                    {
-                        Offer(_primary, "Install on Phone", _engine.InstallPhoneApp, true);
-                    }
-                    break;
                 case PhaseKind.Ready:
-                    // Opening and updating the phone app go through adb, so they're for the adb connection only.
-                    if (_engine.Transport == TransportKind.Adb)
-                    {
-                        Offer(_primary, "Open on Phone", _engine.OpenOnPhone, true);
-                        if (_engine.PhoneAppIsOutdated)
-                        {
-                            Offer(_secondary, "Update on Phone", _engine.InstallPhoneApp, false);
-                        }
-                    }
                     break;
                 case PhaseKind.Working:
                     Offer(_primary, "Cancel", () => _engine.CancelActive("Cancelled on the computer.", true), true);
                     break;
                 default:
                     Offer(_primary, "Check Again", _engine.CheckAgain, true);
-                    if (_engine.Transport == TransportKind.Usb)
-                    {
-                        Offer(_secondary, "USB Driver Setup\u2026", _openUsbSetup, false);
-                    }
                     break;
             }
-            _primary.Enabled = _engine.Busy == null;
+            _primary.Enabled = true;
 
             string text = string.Join(
                 Environment.NewLine,

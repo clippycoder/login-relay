@@ -154,18 +154,3 @@ enum CallbackVerdict {
     case unrelated
     case stateMismatch
 }
-
-/// Quotes a string for the phone's shell (`adb shell` joins its arguments and re-parses them).
-func shellQuote(_ s: String) -> String {
-    "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-}
-
-/// Dotted-number comparison: "0.2.2" < "0.3.0".
-func versionLess(_ a: String, _ b: String) -> Bool {
-    let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
-    for i in 0..<max(x.count, y.count) {
-        let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
-        if l != r { return l < r }
-    }
-    return false
-}

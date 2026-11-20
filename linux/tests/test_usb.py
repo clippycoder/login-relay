@@ -11,14 +11,13 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import SCHEME, FakeWorld, authorize_url, stable_fds, assert_fds_flat, wait_until  # noqa: E402
+from support import SCHEME, authorize_url, stable_fds, assert_fds_flat, wait_until  # noqa: E402
 from fakeusb import (FakeConnection, FakeDevice, FakeInterface, FakePhone, FakeUsbError,  # noqa: E402
                      FakeUsbWorld, FakeTimeout, accessory_interfaces, make_fake_usb, phone_interfaces)
 from test_engine import FakeHost  # noqa: E402
 
 from loginrelay import engine as eng  # noqa: E402
 from loginrelay import usbaoa  # noqa: E402
-from loginrelay.adb import Device  # noqa: E402
 from loginrelay.prefs import Prefs  # noqa: E402
 from loginrelay.usblink import UsbPhoneLink  # noqa: E402
 
@@ -37,7 +36,7 @@ class HelperTests(unittest.TestCase):
     def test_which_devices_look_like_phones(self):
         self.assertTrue(usbaoa.looks_like_phone([(0x06, 0x01, 0x01)]))             # PTP
         self.assertTrue(usbaoa.looks_like_phone([(0x06, 0x01, 0x00)]))
-        self.assertTrue(usbaoa.looks_like_phone([(0xFF, 0x42, 0x01)]))             # adb
+        self.assertTrue(usbaoa.looks_like_phone([(0xFF, 0x42, 0x01)]))             # ADB interface class (recognises the phone only)
         self.assertTrue(usbaoa.looks_like_phone([(0xFF, 0xFF, 0x00)]))             # vendor MTP
         self.assertTrue(usbaoa.looks_like_phone([(0x08, 0x06, 0x50), (0xFF, 0x42, 0x01)]))
         self.assertFalse(usbaoa.looks_like_phone([(0xFF, 0xFF, 0xFF)]))            # Qualcomm download mode
@@ -75,7 +74,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_UNAVAILABLE, "X"), "USB mode needs the python3-usb package")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_UNSUPPORTED, "Pixel"),
                          "Pixel doesn't answer the USB accessory protocol.")
-        self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_BUSY, "Pixel"), "Another program has Pixel open (usually adb).")
+        self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_BUSY, "Pixel"), "Another program has Pixel open.")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_OPEN, "Pixel"), "Couldn't open Pixel over USB.")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_NOT_FOUND, "Pixel"), "Pixel disappeared.")
         self.assertEqual(usbaoa.error_text(usbaoa.AOA_ERR_REQUEST, "Pixel"),
@@ -382,9 +381,9 @@ class UsbEngineCase(unittest.TestCase):
     engine_args = {}
 
     def setUp(self):
-        saved = {k: os.environ.get(k) for k in ("LOGINRELAY_TRANSPORT", "LOGINRELAY_BROWSER")}
+        saved = {k: os.environ.get(k) for k in ("LOGINRELAY_FAKE_PHONE", "LOGINRELAY_BROWSER")}
         self.addCleanup(self._restore_env, saved)
-        os.environ.pop("LOGINRELAY_TRANSPORT", None)
+        os.environ.pop("LOGINRELAY_FAKE_PHONE", None)
         os.environ["LOGINRELAY_BROWSER"] = "none"
         self.world = FakeUsbWorld()
         self.host = FakeHost()
@@ -392,12 +391,11 @@ class UsbEngineCase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="lr-usb-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.prefs = Prefs(os.path.join(self.tmp, "prefs.json"))
-        self.prefs.transport = "usb"
-        self.adb_lookups = []
+        self.adb_stops = []     # calls to the (fake) "stop the adb server" helper; the real one never runs in tests
         args = dict(usb_backend=self.world, usb_host_name="Test Mac", usb_idle_pause=0.1, usb_recheck=0.2,
                     usb_switch_poll=0.05, usb_switch_polls=40, usb_open_wait=0.05, usb_error_pause=0.3,
                     delivery_timeout=0.8, usb_link_args=dict(ping_interval=0.2, silence=1.0),
-                    locate=self._locate, check_interval=0.4, link_recheck=0.5, done_delay=0.3)
+                    stop_adb=self._stop_adb)
         args.update(self.engine_args)
         self.engine = eng.RelayEngine(self.host, self.prefs, **args)
 
@@ -415,9 +413,9 @@ class UsbEngineCase(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def _locate(self, choice):
-        self.adb_lookups.append(choice)
-        return None
+    def _stop_adb(self):
+        self.adb_stops.append(time.monotonic())
+        return True
 
     def tearDown(self):
         self.assertEqual(self.host.wrong_thread, [])
@@ -466,7 +464,7 @@ class CandidateTests(UsbEngineCase):
                           "Plug the phone in and choose “File transfer” in its USB notification. "
                           "USB debugging isn't needed."))
         self.assertEqual(self.world.switch_calls, [])
-        self.assertEqual(self.adb_lookups, [])           # adb is never consulted in USB mode
+        self.assertEqual(self.adb_stops, [])             # nothing was busy, so adb is never touched
 
     def test_unrelated_devices_are_never_touched(self):
         self.world.add_other("1-7")                       # Qualcomm download mode
@@ -557,7 +555,7 @@ class SwitchTests(UsbEngineCase):
 
     def test_the_default_rate_limit_is_twenty_seconds(self):
         self.assertEqual(eng.USB_SWITCH_INTERVAL, 20.0)
-        e = eng.RelayEngine(FakeHost(), self.prefs)
+        e = eng.RelayEngine(FakeHost(), self.prefs, usb_backend=self.world)
         self.assertEqual(e._usb_switch_interval, 20.0)
 
     def test_the_rate_limit_forgets_a_phone_that_left_the_bus(self):
@@ -598,6 +596,41 @@ class SwitchTests(UsbEngineCase):
         self.start()
         self.wait_until_detail("Pixel 7 doesn't answer the USB accessory protocol.")
 
+    def test_busy_on_open_stops_the_adb_server_and_retries(self):
+        self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_BUSY, "Resource busy")
+        self.world.add_phone("1-4", accessory=True, pid=0x2D01)
+        self.start()
+        wait_until(lambda: self.adb_stops, 5, "the adb server to be stopped")
+        self.wait_log("Pixel 7 is busy. Stopped the adb server that was probably holding it.")
+        wait_until(lambda: len(self.world.open_calls) >= 3, 5, "the retries")
+        self.world.open_error = None                      # adb let go
+        self.wait_phase(eng.READY)
+        self.assertEqual(len(self.adb_stops), 1)          # once, not once per attempt
+
+    def test_busy_on_the_switch_stops_the_adb_server(self):
+        self.world.switch_error = usbaoa.SwitchResult(usbaoa.AOA_ERR_BUSY, 0, "Resource busy")
+        self.world.add_phone("1-4")
+        self.start()
+        self.wait_until_detail("Another program has Pixel 7 open.")
+        self.assertEqual(len(self.adb_stops), 1)
+
+    def test_the_adb_server_is_not_stopped_again_and_again(self):
+        self.engine._adb_stop_interval = 60
+        self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_BUSY, "Resource busy")
+        self.world.add_phone("1-4", accessory=True, pid=0x2D01)
+        self.start()
+        wait_until(lambda: len(self.world.open_calls) >= 14, 10, "two rounds of retries")
+        self.assertEqual(len(self.adb_stops), 1)
+
+    def test_no_adb_installed_is_silent(self):
+        self.engine._stop_adb = lambda: False
+        self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_BUSY, "Resource busy")
+        self.world.add_phone("1-4", accessory=True, pid=0x2D01)
+        self.start()
+        wait_until(lambda: len(self.world.open_calls) >= 3, 5, "the retries")
+        self.assertFalse([t for t in self.logs() if "adb" in t])
+        self.wait_until_detail("Another program has Pixel 7 open.")
+
     def test_permission_denied_on_open_is_not_retried_forever(self):
         self.world.open_error = usbaoa.UsbError(usbaoa.AOA_ERR_PERMISSION, NO_PERMISSION)
         self.world.add_phone("1-4", accessory=True, pid=0x2D01)
@@ -636,7 +669,7 @@ class SessionTests(UsbEngineCase):
                          "otherwise just start a sign-in on the phone and Login Relay starts by itself.")
         self.assertEqual(eng.describe(self.engine),
                          ("Pixel 7 is connected over USB", self.engine.phase.detail))
-        self.assertEqual(eng.window_actions(self.engine)[0], ("Check Again", eng.A_CHECK))
+        self.assertEqual(eng.window_actions(self.engine), (("Check Again", eng.A_CHECK), None))
         self.assertIn("USB connection open.", self.logs())
         self.assertFalse(self.engine.usb_alive)
         # The app comes up on the phone: hello, then it answers pings.
@@ -670,7 +703,7 @@ class SessionTests(UsbEngineCase):
         self.assertIsNone(self.engine._awaiting_delivery)
         time.sleep(1.0)
         self.assertNotIn("The phone didn't confirm it handed the result to the app.", self.logs())
-        self.assertEqual(self.adb_lookups, [])           # no adb anywhere in this flow
+        self.assertEqual(self.adb_stops, [])
         self.assertEqual(self.engine.phase.kind, eng.READY)
 
     def test_a_decoy_return_address_is_ignored(self):
@@ -826,120 +859,92 @@ class SessionTests(UsbEngineCase):
         wait_until(lambda: self.world.connections[0].closed, 5, "the pipe to close")
 
 
-class TransportTests(UsbEngineCase):
-    def test_transport_defaults_to_adb_and_env_overrides(self):
-        prefs = Prefs(os.path.join(self.tmp, "other.json"))
-        e = eng.RelayEngine(FakeHost(), prefs, usb_backend=self.world)
-        self.assertEqual(e.transport, "adb")
-        os.environ["LOGINRELAY_TRANSPORT"] = "usb"
-        self.assertEqual(e.transport, "usb")
-        os.environ["LOGINRELAY_TRANSPORT"] = "adb"
-        prefs.transport = "usb"
-        self.assertEqual(e.transport, "adb")
-        os.environ["LOGINRELAY_TRANSPORT"] = "bogus"
-        self.assertEqual(e.transport, "usb")
-
+class MenuTests(UsbEngineCase):
     def test_prefs_round_trip(self):
         p = Prefs(os.path.join(self.tmp, "p.json"))
-        self.assertEqual((p.transport, p.usb_selected), ("adb", None))
-        p.transport = "usb"
+        self.assertIsNone(p.usb_selected)
         p.usb_selected = "1-4.2"
-        q = Prefs(p.path)
-        self.assertEqual((q.transport, q.usb_selected), ("usb", "1-4.2"))
-        p.transport = "nonsense"
-        self.assertEqual(Prefs(p.path).transport, "adb")
+        self.assertEqual(Prefs(p.path).usb_selected, "1-4.2")
 
-    def test_env_override_starts_the_usb_loop(self):
-        self.prefs.transport = "adb"
-        os.environ["LOGINRELAY_TRANSPORT"] = "usb"
-        self.ready_phone()
+    def test_prefs_from_older_versions_are_ignored_and_kept(self):
+        path = os.path.join(self.tmp, "old.json")
+        with open(path, "w") as f:
+            f.write('{"transport": "adb", "adbPath": "/opt/adb", "selectedSerial": "ABC", "notifications": true}')
+        p = Prefs(path)
+        self.assertTrue(p.notifications)
+        for name in ("transport", "adb_path", "selected_serial"):
+            self.assertFalse(hasattr(p, name), name)
+        e = eng.RelayEngine(FakeHost(), p, usb_backend=self.world, stop_adb=self._stop_adb)
+        self.assertFalse(hasattr(e, "transport"))
+        self.assertFalse(hasattr(e, "adb"))
 
-    def test_switching_to_usb_and_back_to_adb(self):
-        adb_world = FakeWorld()
-        self.addCleanup(adb_world.close)
-        adb_world.start_phone()
-        self.prefs.transport = "adb"
-        self.engine._locate = lambda choice: adb_world.adb
-        self.start()
-        self.wait_phase(eng.READY)
-        self.assertIsNotNone(self.engine.adb)
-        self.assertEqual(self.engine.transport, "adb")
-        self.assertEqual(self.world.list_calls, 0)
-
-        self.ui(lambda: self.engine.set_transport("usb"))
-        self.assertEqual(self.prefs.transport, "usb")
-        self.assertIn("Connecting over USB accessory mode (no USB debugging needed).", self.logs())
-        self.assertIsNone(self.engine.adb)
-        self.assertEqual(self.engine.devices, [])
-        self.wait_phase(eng.NO_PHONE)
-        self.world.add_phone("1-4")
-        self.wait_phase(eng.READY)
-        self.assertEqual(self.engine.device.serial, "usb:1-4")
-        self.assertEqual(self.engine.transport, "usb")
-        labels = [e.label for e in eng.menu_model(self.engine) if e.kind == "action"]
-        self.assertNotIn("Open Login Relay on Phone", labels)
-
-        self.ui(lambda: self.engine.set_transport("adb"))
-        self.assertIn("Connecting over adb.", self.logs())
-        self.assertFalse(self.engine.usb_alive)
-        self.wait_phase(eng.READY)
-        self.assertEqual(self.engine.device.serial, "FAKE0001")
-        self.assertEqual(Prefs(self.prefs.path).transport, "adb")
-        wait_until(lambda: self.world.connections[0].closed, 5, "the USB pipe to close")
-        self.assertEqual(self.engine._generation, 3)
-
-    def test_switching_mid_login_cancels_it_and_closes_the_link(self):
-        phone, flow, redirect = self.begin_login("STATE-T1")
-        self.ui(lambda: self.engine.set_transport("adb"))
-        self.assertIsNone(self.engine.active)
-        self.assertIn("Switching connection type.", self.logs())
-        self.assertTrue(self.host.claims[0].released)
-        wait_until(lambda: phone.messages("done"), 5, "done")
-        wait_until(lambda: self.world.connections[0].closed, 5, "the pipe to close")
-        self.assertFalse(self.engine.linked)
-        self.assertEqual(self.engine.phase.kind, eng.NO_ADB)   # adb isn't found in this test
-
-    def test_choosing_the_current_transport_does_nothing(self):
-        self.start()
-        self.wait_phase(eng.NO_PHONE)
-        gen = self.engine._generation
-        self.ui(lambda: self.engine.set_transport("usb"))
-        self.assertEqual(self.engine._generation, gen)
-
-    def test_the_menu_and_window_data(self):
+    def test_the_menu_and_window_data_with_no_phone(self):
         self.start()
         self.wait_phase(eng.NO_PHONE)
         menu = eng.menu_model(self.engine)
-        connect = [e for e in menu if e.label == "Connect Over"][0]
-        self.assertEqual(connect.kind, "submenu")
-        self.assertEqual([(c.label, c.action, c.arg, c.checked) for c in connect.children],
-                         [("adb (needs USB debugging)", eng.A_SET_TRANSPORT, "adb", False),
-                          ("USB accessory (no USB debugging) — beta", eng.A_SET_TRANSPORT, "usb", True)])
-        self.assertEqual(connect.children, eng.transport_choices(self.engine))
-        self.assertEqual(menu[0].label, "No phone found over USB")
+        self.assertEqual([e.label for e in menu],
+                         ["No phone found over USB",
+                          "Plug the phone in and choose \u201cFile transfer\u201d in its USB notification. "
+                          "USB debugging isn't needed.",
+                          "", "Check Again", "", "Show Activity…", "", "Launch at Login",
+                          "Notify When a Sign-in Arrives", "", "About Login Relay", "Quit Login Relay"])
         self.assertEqual(menu[1].kind, "hint")
-        self.assertEqual([e.label for e in menu if e.kind == "action"][:1], ["Check Again"])
+        self.assertFalse(menu[0].good)
+        self.assertEqual(eng.window_actions(self.engine), (("Check Again", eng.A_CHECK), None))
 
-    def test_adb_only_actions_are_hidden_in_usb_mode(self):
-        apk = os.path.join(self.tmp, "login-relay.apk")
-        open(apk, "wb").close()
-        self.engine._bundled_apk = apk
-        self.engine.bundled_phone_version = "9.9.9"
+    def test_the_menu_and_window_data_when_ready(self):
         self.ready_phone()
-        self.assertEqual(self.engine.phone_version, "0.5.0")
-        self.assertTrue(self.engine.phone_app_is_outdated)
-        labels = [e.label for e in eng.menu_model(self.engine) if e.kind == "action"]
-        self.assertEqual(labels, ["Show Activity…", "About Login Relay", "Quit Login Relay"])
-        self.assertEqual(eng.window_actions(self.engine), (None, None, True))
-        self.assertEqual(eng.describe(self.engine)[1], "Sign in to an app on the phone and the page opens here.")
-        menu = eng.menu_model(self.engine)
-        self.assertEqual([e.label for e in menu][:3], ["Pixel 7 is ready", "", "Connect Over"])
+        menu = eng.menu_model(self.engine, launch_at_login=True)
+        self.assertEqual([e.label for e in menu],
+                         ["Pixel 7 is ready", "", "Show Activity…", "", "Launch at Login",
+                          "Notify When a Sign-in Arrives", "", "About Login Relay", "Quit Login Relay"])
         self.assertTrue(menu[0].good)
+        self.assertTrue([e for e in menu if e.label == "Launch at Login"][0].checked)
+        self.assertEqual(eng.window_actions(self.engine), (None, None))
+        self.assertEqual(eng.describe(self.engine),
+                         ("Pixel 7 is ready", "Sign in to an app on the phone and the page opens here."))
 
-    def test_working_menu_in_usb_mode(self):
+    def test_nothing_in_the_ui_mentions_adb_or_installing(self):
+        self.ready_phone()
+        for e in eng.menu_model(self.engine):
+            self.assertNotIn("adb", e.label.lower())
+            self.assertNotIn("install", e.label.lower())
+            self.assertNotIn("connect over", e.label.lower())
+        for name in ("A_DOWNLOAD", "A_CHOOSE_ADB", "A_INSTALL", "A_OPEN", "A_SET_TRANSPORT", "A_SELECT_PHONE",
+                     "NO_ADB", "NEEDS_APP", "UNAUTHORIZED", "ADB", "transport_choices", "find_bundled"):
+            self.assertFalse(hasattr(eng, name), name)
+
+    def test_working_menu(self):
         phone, flow, redirect = self.begin_login("STATE-T2")
         self.assertEqual(eng.window_actions(self.engine)[0], ("Cancel", eng.A_CANCEL))
         self.assertEqual([e.label for e in eng.menu_model(self.engine) if e.kind == "action"][0], "Cancel sign-in")
+        self.assertEqual(eng.describe(self.engine),
+                         ("Example App sign-in in progress",
+                          "Finish in your browser. If it asks to open Login Relay, allow it."))
+
+
+class WatchdogTests(UsbEngineCase):
+    engine_args = dict(watchdog_interval=0.3, watchdog_after=1.0)
+
+    def test_stuck_loop_is_replaced(self):
+        # The first look at the bus hangs; the watchdog should start a fresh loop that works.
+        real = self.world.list_devices
+        hung = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def list_devices():
+            if not hung.is_set():
+                hung.set()
+                release.wait(8)
+            return real()
+
+        self.world.list_devices = list_devices
+        self.world.add_phone("1-4")
+        self.start()
+        wait_until(lambda: "Checking for the phone got stuck; starting over." in self.logs(), 10, "the watchdog")
+        self.wait_phase(eng.READY, 10)
+        self.assertEqual(self.engine._generation, 2)
 
 
 class NoPyUsbTests(UsbEngineCase):
@@ -956,61 +961,9 @@ class NoPyUsbTests(UsbEngineCase):
                          ("No phone found over USB", "USB mode needs the python3-usb package"))
         menu = eng.menu_model(self.engine)
         self.assertEqual(menu[1].label, "USB mode needs the python3-usb package")
-        self.assertIn("Connect Over", [e.label for e in menu])     # the way back to adb is still there
+        self.assertIn("Check Again", [e.label for e in menu])
         time.sleep(0.5)
         self.assertEqual(self.host.wrong_thread, [])
-
-
-class AdbModeUnchangedTests(unittest.TestCase):
-    """The adb engine's own tests live in test_engine.py; this checks what USB mode added around them."""
-
-    def setUp(self):
-        saved = os.environ.pop("LOGINRELAY_TRANSPORT", None)
-        if saved is not None:
-            self.addCleanup(os.environ.__setitem__, "LOGINRELAY_TRANSPORT", saved)
-        self.world = FakeWorld()
-        self.addCleanup(self.world.close)
-        self.host = FakeHost()
-        self.addCleanup(self.host.stop)
-        self.tmp = tempfile.mkdtemp(prefix="lr-adb-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.prefs = Prefs(os.path.join(self.tmp, "prefs.json"))
-        self.usb = FakeUsbWorld()
-        self.engine = eng.RelayEngine(self.host, self.prefs, check_interval=0.4, link_recheck=0.5,
-                                      usb_backend=self.usb)
-
-    def test_adb_mode_never_touches_usb_and_keeps_its_menu(self):
-        self.world.start_phone()
-        self.host.ask(self.engine.start)
-        self.addCleanup(lambda: self.host.ask(self.engine.shutdown))
-        wait_until(lambda: self.engine.phase.kind == eng.READY, 15, "ready")
-        time.sleep(1.0)
-        self.assertEqual(self.usb.list_calls, 0)
-        self.assertEqual(self.engine.transport, "adb")
-        menu = eng.menu_model(self.engine)
-        self.assertEqual([e.label for e in menu],
-                         ["Fake Phone is ready", "", "Open Login Relay on Phone", "", "Connect Over",
-                          "Show Activity…", "", "Launch at Login", "Notify When a Sign-in Arrives", "",
-                          "About Login Relay", "Quit Login Relay"])
-        connect = [e for e in menu if e.label == "Connect Over"][0]
-        self.assertEqual([c.checked for c in connect.children], [True, False])
-        self.assertEqual(eng.window_actions(self.engine), (("Open on Phone", eng.A_OPEN), None, True))
-        self.assertEqual(eng.usb_phone_choices(self.engine), ())
-        self.assertEqual(eng.describe(self.engine)[0], "Fake Phone is ready")
-
-    def test_adb_no_phone_text_is_unchanged(self):
-        self.world.write("devices.txt", "")
-        self.host.ask(self.engine.start)
-        self.addCleanup(lambda: self.host.ask(self.engine.shutdown))
-        wait_until(lambda: self.engine.phase.kind == eng.NO_PHONE, 15, "no phone")
-        self.assertEqual(eng.describe(self.engine)[0], "No phone connected")
-
-    def test_a_hello_over_adb_is_only_logged(self):
-        dev = Device("ABC", "device", "Pixel")
-        self.host.ask(lambda: self.engine._handle({"type": "hello", "transport": "adb", "version": "0.5.0"},
-                                                  None, dev))
-        wait_until(lambda: any("says hello" in t for _, t in self.engine.log_lines), 5, "the log line")
-        self.assertIsNone(self.engine.phone_version)       # adb learns the version from `pm`, not from hello
 
 
 class DescriptorLeakTests(UsbEngineCase):

@@ -7,5 +7,5 @@ Exec=loginrelay
 Icon=io.github.clippycoder.LoginRelay
 Terminal=false
 Categories=Utility;
-Keywords=android;adb;sign-in;login;oauth;
+Keywords=android;usb;sign-in;login;oauth;
 StartupNotify=false

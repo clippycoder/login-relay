@@ -19,11 +19,6 @@ namespace LoginRelay.App
             get { return Environment.ProcessPath ?? Application.ExecutablePath; }
         }
 
-        private static string ExeDirectory
-        {
-            get { return Path.GetDirectoryName(ExePath) ?? AppContext.BaseDirectory; }
-        }
-
         public WindowsPlatform(NotifyIcon tray)
         {
             _tray = tray;
@@ -93,35 +88,6 @@ namespace LoginRelay.App
             form.Show();
             form.Activate();
             return form;
-        }
-
-        public string? BundledApkPath
-        {
-            get
-            {
-                string path = Path.Combine(ExeDirectory, "login-relay.apk");
-                return File.Exists(path) ? path : null;
-            }
-        }
-
-        public string? BundledPhoneVersion
-        {
-            get
-            {
-                try
-                {
-                    string path = Path.Combine(ExeDirectory, "phone-app-version.txt");
-                    if (File.Exists(path))
-                    {
-                        string text = File.ReadAllText(path).Trim();
-                        return text.Length == 0 ? null : text;
-                    }
-                }
-                catch (Exception)
-                {
-                }
-                return null;
-            }
         }
     }
 

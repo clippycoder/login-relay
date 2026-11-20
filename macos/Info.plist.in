@@ -18,7 +18,5 @@
     <key>LSUIElement</key><true/>
     <key>NSHumanReadableCopyright</key><string>GPL-3.0-or-later</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <!-- Version of the phone app bundled in Resources, so the Mac app can offer updates. -->
-    <key>LoginRelayPhoneAppVersion</key><string>@PHONE_VERSION@</string>
 </dict>
 </plist>

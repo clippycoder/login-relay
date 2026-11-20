@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""End-to-end test of a Login Relay desktop app against a fake phone and a fake adb.
+"""End-to-end test of a Login Relay desktop app against a fake phone (USB accessory mode over a socket).
 
     python3 tests/e2e/run_e2e.py -- <command that starts the app>
 
@@ -9,13 +9,14 @@ For example:
     python3 tests/e2e/run_e2e.py -- python3 -m loginrelay        (Linux, from linux/)
     python3 tests/e2e/run_e2e.py -- windows\\bin\\LoginRelay.exe   (Windows)
 
-The app is started with LOGINRELAY_ADB (the fake adb wrapper) and LOGINRELAY_BROWSER=none (don't
-open a browser) set. The driver plays the part of the browser: it hands "return addresses" to the
+The app is started with LOGINRELAY_FAKE_PHONE=127.0.0.1:<port> (it treats that socket as a plugged-in
+phone and runs its normal USB logic over it) and LOGINRELAY_BROWSER=none (don't open a browser) set. The driver plays the part of the browser: it hands "return addresses" to the
 operating system exactly as a browser would, so the app's claim on the URL scheme is exercised for
 real. Scenarios:
 
-  signin    a page arrives; a return address with the wrong state is ignored; the right one is handed
-            to the phone (am start ... -p <package>); the phone gets "done"; the claim is released
+  signin    a page arrives; a return address with the wrong state is ignored; the right one is sent to
+            the phone as a "callback" (which the fake phone vets and acknowledges); the app logs the delivery;
+            the claim is released
   cancel    the phone cancels mid-login: nothing is handed over, the claim is released
   signout   same as signin, for a page whose return address is in returnTo
 """
@@ -90,23 +91,16 @@ class Run:
         self.state = tempfile.mkdtemp(prefix="lr-e2e-")
         self.failures = 0
         self.app = None
-        bindir = os.path.join(self.state, "bin")
-        os.makedirs(bindir)
-        fake = os.path.join(HERE, "fake_adb.py")
-        if sys.platform.startswith("win"):
-            self.adb = os.path.join(bindir, "adb.cmd")
-            with open(self.adb, "w") as f:
-                f.write(f'@"{sys.executable}" "{fake}" %*\r\n')
-        else:
-            self.adb = os.path.join(bindir, "adb")
-            with open(self.adb, "w") as f:
-                f.write(f'#!/bin/sh\nexec "{sys.executable}" "{fake}" "$@"\n')
-            os.chmod(self.adb, 0o755)
         self.phone = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_phone.py"), "--state", self.state,
                                        "--referrer", f"android-app://{PACKAGE}", *phone_args])
         self.wait(lambda: os.path.exists(self.p("phone_port")), 10, "fake phone to listen")
-        env = dict(os.environ, LOGINRELAY_ADB=self.adb, LOGINRELAY_BROWSER="none", LOGINRELAY_TRANSPORT="adb",
-                   FAKE_ADB_STATE=self.state)
+        with open(self.p("phone_port")) as f:
+            port = f.read().strip()
+        # Each run logs to its own file so a scenario can only see its own lines; close() copies it to the
+        # file the caller asked for with LOGINRELAY_LOG (CI prints that one).
+        self.outer_log = os.environ.get("LOGINRELAY_LOG")
+        env = dict(os.environ, LOGINRELAY_FAKE_PHONE=f"127.0.0.1:{port}", LOGINRELAY_BROWSER="none",
+                   LOGINRELAY_LOG=self.p("app.log"))
         self.app = subprocess.Popen(app_cmd, env=env)
 
     def p(self, name):
@@ -141,6 +135,13 @@ class Run:
         else:
             self.fail(msg)
 
+    def app_logged(self, text):
+        try:
+            with open(self.p("app.log"), encoding="utf-8", errors="replace") as f:
+                return text in f.read()
+        except OSError:
+            return False
+
     def close(self):
         for proc in (self.app, self.phone):
             if proc and proc.poll() is None:
@@ -149,6 +150,13 @@ class Run:
                     proc.wait(5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+        if self.outer_log:
+            try:
+                with open(self.p("app.log"), encoding="utf-8", errors="replace") as f, \
+                        open(self.outer_log, "a", encoding="utf-8") as out:
+                    out.write(f.read())
+            except OSError:
+                pass
         shutil.rmtree(self.state, ignore_errors=True)
 
 
@@ -171,19 +179,19 @@ def scenario_login(app_cmd, kind):
         if decoy:
             open_like_a_browser(decoy)
             time.sleep(2.5)
-            r.check(not r.lines("am_calls.jsonl"), "a return address with the wrong state was ignored")
+            r.check(not r.lines("callbacks.jsonl"), "a return address with the wrong state was ignored")
         good = f"{redirect}?code=GOOD&state={state}" if kind == "signin" else redirect
         open_like_a_browser(good)
-        r.check(r.wait(lambda: r.lines("am_calls.jsonl"), 20, "the return address to reach the phone"),
+        r.check(r.wait(lambda: r.lines("callbacks.jsonl"), 20, "the return address to reach the phone"),
                 "the return address was handed to the phone")
-        calls = r.lines("am_calls.jsonl")
+        calls = r.lines("callbacks.jsonl")
         if calls:
-            c = calls[0]
-            r.check(c.get("-d") == good, f"it arrived intact: {c.get('-d')!r}")
-            r.check(c.get("-p") == PACKAGE, f"it went to the app that asked: {c.get('-p')!r}")
-            r.check(c.get("-a") == "android.intent.action.VIEW", "as a VIEW intent")
-        r.check(r.wait(lambda: phone_got(r, "done"), 15, "Login Relay to be told it's done"),
-                "the phone was told 'done'")
+            r.check(calls[0].get("url") == good, f"it arrived intact: {calls[0].get('url')!r}")
+            r.check(len(calls) == 1, "and only once")
+        # In USB mode the phone closes its own screen once it has handed the result to the app, so the app
+        # doesn't send "done" after "delivered"; it logs that the app is finishing.
+        r.check(r.wait(lambda: r.app_logged("Done: "), 15, "the app to log that the sign-in is finishing"),
+                "the phone confirmed delivery and the app logged it")
         r.check(phone_got(r, "status"), "the phone got a status line")
         holder = claim_holder()
         r.check(holder in ("", None), f"the claim was released (holder now: {holder!r})")
@@ -202,7 +210,7 @@ def scenario_cancel(app_cmd):
                 "the claim was released when the phone cancelled")
         open_like_a_browser(f"{redirect}?code=LATE&state=E2E-STATE-2")
         time.sleep(2)
-        r.check(not r.lines("am_calls.jsonl"), "a late return address was not handed over")
+        r.check(not r.lines("callbacks.jsonl"), "a late return address was not handed over")
     finally:
         r.close()
     return r.failures

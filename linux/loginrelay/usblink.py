@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The connection to the Login Relay app on the phone over a USB accessory pipe.
 
-Same line-delimited JSON as the adb link (phonelink.py). Bulk USB has no "connection closed", so the
-link pings the phone and tracks whether anything has come back recently ("alive").
+Line-delimited JSON, one message per line. Bulk USB has no "connection closed", so the link pings
+the phone and tracks whether anything has come back recently ("alive").
 Port of UsbPhoneLink in macos/Sources/Usb.swift.
 """
 from __future__ import annotations
@@ -46,7 +46,9 @@ class UsbPhoneLink:
         threading.Thread(target=self._read_loop, name="usb-link", daemon=True).start()
 
     def send(self, obj: dict) -> None:
-        frame = usb_frame(json.dumps(obj, separators=(",", ":")).encode("utf-8"))
+        body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        # Only real USB pipes need the packet-boundary padding (the TCP test hook sets needs_padding=False).
+        frame = usb_frame(body) if getattr(self._conn, "needs_padding", True) else body + b"\n"
         with self._write_lock:
             if self._closed or self._stopping.is_set():
                 return

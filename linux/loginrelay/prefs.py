@@ -35,7 +35,7 @@ def default_prefs_path(env=None) -> str:
 
 
 def share_dirs(env=None) -> List[str]:
-    """Folders that may hold the tray icons, login-relay.apk and phone-app-version.txt."""
+    """Folders that may hold the tray icons (and, if shipped, login-relay.apk for people to find)."""
     env = os.environ if env is None else env
     dirs: List[str] = []
     if env.get("LOGINRELAY_SHARE"):
@@ -56,7 +56,8 @@ def find_share_file(relative: str, env=None) -> Optional[str]:
 
 
 class Prefs:
-    """adb path, selected phone, connection type, notifications, launch-at-login, first-launch flag."""
+    """Selected USB phone, notifications, launch-at-login, first-launch flag. (Keys written by older versions,
+    such as adbPath, selectedSerial and transport, are ignored and left alone.)"""
 
     def __init__(self, path: Optional[str] = None):
         self.path = path or default_prefs_path()
@@ -101,34 +102,6 @@ class Prefs:
                     os.unlink(tmp)
                 except OSError:
                     pass
-
-    @property
-    def adb_path(self) -> Optional[str]:
-        v = self._get("adbPath")
-        return v if isinstance(v, str) and v else None
-
-    @adb_path.setter
-    def adb_path(self, value: Optional[str]) -> None:
-        self._set("adbPath", value)
-
-    @property
-    def selected_serial(self) -> Optional[str]:
-        v = self._get("selectedSerial")
-        return v if isinstance(v, str) and v else None
-
-    @selected_serial.setter
-    def selected_serial(self, value: Optional[str]) -> None:
-        self._set("selectedSerial", value)
-
-    @property
-    def transport(self) -> str:
-        """How the computer reaches the phone: "adb" (the default) or "usb" (accessory mode)."""
-        v = self._get("transport")
-        return v if v in ("adb", "usb") else "adb"
-
-    @transport.setter
-    def transport(self, value: str) -> None:
-        self._set("transport", value if value in ("adb", "usb") else "adb")
 
     @property
     def usb_selected(self) -> Optional[str]:

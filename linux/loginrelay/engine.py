@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Watches for a phone, keeps a link to the Login Relay app on it, and runs each login: opens the
-page in the browser, catches the redirect, and hands it back to the phone.
+"""Watches the USB bus for a phone, keeps a link to the Login Relay app on it, and runs each login:
+opens the page in the browser, catches the redirect, and hands it back to the phone.
 
 Port of macos/Sources/RelayEngine.swift. UI-agnostic: it talks to the world only through a `Host`.
 State lives on the UI thread (everything the engine changes goes through host.post); one background
-thread polls adb (or the USB bus, in USB accessory mode) and owns the link.
+thread polls the USB bus (USB accessory mode, no USB debugging) and owns the link.
 """
 from __future__ import annotations
 
@@ -18,31 +18,24 @@ from collections import namedtuple
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import PHONE_PACKAGE, usbaoa
-from .adb import Adb, Device
-from .phonelink import PhoneLink
-from .prefs import Prefs, find_share_file
+from . import adbserver, fakephone, usbaoa
 from .redirect import (OK, PLAIN_LINK, SIGN_IN, STATE_MISMATCH, UNRELATED, RelayRequest,
-                       url_params, url_scheme, version_less)
+                       url_params, url_scheme)
 from .usblink import UsbPhoneLink
+from .prefs import Prefs
 
 LOGIN_TIMEOUT = 15 * 60
 
-NO_ADB = "noAdb"
 NO_PHONE = "noPhone"
-UNAUTHORIZED = "unauthorized"
-NEEDS_APP = "needsApp"
-CONNECTING = "connecting"   # USB mode: a phone is plugged in but Login Relay on it isn't answering yet
+CONNECTING = "connecting"   # a phone is plugged in but Login Relay on it isn't answering yet
 READY = "ready"
 WORKING = "working"
-
-ADB = "adb"
-USB = "usb"
 
 USB_WAITING = ("Login Relay on the phone isn't answering yet. If Android asks to allow USB access, tap OK; "
                "otherwise just start a sign-in on the phone and Login Relay starts by itself.")
 DELIVERY_TIMEOUT = 10.0       # how long to wait for the phone to confirm it handed the result to the app
 USB_SWITCH_INTERVAL = 20.0    # at most one accessory switch attempt per phone per this many seconds
+ADB_STOP_INTERVAL = 20.0      # at most one attempt to stop an adb server holding the phone per this many seconds
 
 PhaseInfo = namedtuple("PhaseInfo", "kind device flow detail", defaults=(None,))
 
@@ -91,6 +84,17 @@ class Host:
         """The login ended some other way; close the prompt shown by ask_for_pasted_address."""
 
 
+@dataclass(frozen=True)
+class Device:
+    """The phone being used. `serial` is "usb:<port location>"."""
+    serial: str
+    model: str = ""
+
+    @property
+    def title(self) -> str:
+        return self.serial if not self.model else self.model.replace("_", " ")
+
+
 class Flow:
     """One sign-in (or sign-out) in progress."""
 
@@ -117,29 +121,26 @@ def _openable(url: str) -> bool:
 
 
 class RelayEngine:
-    def __init__(self, host: Host, prefs: Prefs, *, bundled_apk: Optional[str] = None,
-                 bundled_phone_version: Optional[str] = None, check_interval: float = 3.0,
-                 link_recheck: float = 3.0, watchdog_interval: float = 10.0, watchdog_after: float = 30.0,
-                 login_timeout: float = LOGIN_TIMEOUT, done_delay: float = 1.5,
-                 locate: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+    def __init__(self, host: Host, prefs: Prefs, *, watchdog_interval: float = 10.0, watchdog_after: float = 30.0,
+                 login_timeout: float = LOGIN_TIMEOUT,
                  usb_backend: Optional[usbaoa.UsbBackend] = None, usb_host_name: Optional[str] = None,
                  usb_idle_pause: float = 1.0, usb_recheck: float = 1.0,
                  usb_switch_interval: float = USB_SWITCH_INTERVAL, usb_switch_poll: float = 0.2,
                  usb_switch_polls: int = 60, usb_open_attempts: int = 6, usb_open_wait: float = 0.5,
                  usb_error_pause: float = 3.0, delivery_timeout: float = DELIVERY_TIMEOUT,
-                 usb_link_args: Optional[dict] = None):
+                 usb_link_args: Optional[dict] = None,
+                 stop_adb: Optional[Callable[[], bool]] = None,
+                 adb_stop_interval: float = ADB_STOP_INTERVAL):
         self.host = host
         self.prefs = prefs
-        self._bundled_apk = bundled_apk
-        self.bundled_phone_version = bundled_phone_version
-        self._check_interval = check_interval
-        self._link_recheck = link_recheck
         self._watchdog_interval = watchdog_interval
         self._watchdog_after = watchdog_after
         self._login_timeout = login_timeout
-        self._done_delay = done_delay
-        self._locate = locate or (lambda choice: Adb.locate(user_choice=choice))
-        self._usb_backend = usb_backend or usbaoa.default_backend()
+        if usb_backend is None:
+            # Test hook: LOGINRELAY_FAKE_PHONE=host:port stands in for one USB phone (see fakephone.py).
+            fake = fakephone.configured()
+            usb_backend = fakephone.TcpPhoneBackend(fake) if fake else usbaoa.default_backend()
+        self._usb_backend = usb_backend
         self._usb_host_name = usb_host_name or usbaoa.local_host_name()
         self._usb_idle_pause = usb_idle_pause
         self._usb_recheck = usb_recheck
@@ -151,20 +152,19 @@ class RelayEngine:
         self._usb_error_pause = usb_error_pause
         self._delivery_timeout = delivery_timeout
         self._usb_link_args = usb_link_args or {}
+        self._stop_adb = stop_adb or adbserver.stop_adb_server
+        self._adb_stop_interval = adb_stop_interval
+        self._last_adb_stop = float("-inf")
 
         # state (UI thread)
-        self.adb: Optional[Adb] = None
-        self.devices: List[Device] = []
         self.device: Optional[Device] = None
         self.phone_version: Optional[str] = None
         self.linked = False
         self.active: Optional[Flow] = None
-        self.busy: Optional[str] = None
         self.log_lines: List[Tuple[datetime.datetime, str]] = []
         self.on_change: Optional[Callable[[], None]] = None
         self.log_hooks: List[Callable[[datetime.datetime, str], None]] = []
         self.verbose = False
-        # USB accessory mode (UI thread)
         self.usb_candidates: List[usbaoa.UsbDevice] = []
         self.usb_detail = ""
         self.usb_alive = False
@@ -179,39 +179,14 @@ class RelayEngine:
         self._watchdog = None
         self._force_check = False
         self._wake = threading.Event()
-        self._current_link = None  # PhoneLink or UsbPhoneLink
+        self._current_link = None  # UsbPhoneLink
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
     # ---- derived state ----------------------------------------------------------------------
 
     @property
-    def transport(self) -> str:
-        """"adb" or "usb". Test hook: LOGINRELAY_TRANSPORT=adb|usb overrides the saved choice."""
-        forced = os.environ.get("LOGINRELAY_TRANSPORT")
-        if forced in (ADB, USB):
-            return forced
-        return self.prefs.transport
-
-    @property
     def phase(self) -> PhaseInfo:
-        if self.transport == USB:
-            return self._usb_phase
-        if self.adb is None:
-            return PhaseInfo(NO_ADB, None, None)
-        if self.device is None:
-            blocked = next((d for d in self.devices if not d.is_usable), None)
-            if blocked is not None:
-                return PhaseInfo(UNAUTHORIZED, blocked, None)
-            return PhaseInfo(NO_PHONE, None, None)
-        if self.phone_version is None:
-            return PhaseInfo(NEEDS_APP, self.device, None)
-        if self.active is not None:
-            return PhaseInfo(WORKING, self.device, self.active)
-        return PhaseInfo(READY, self.device, None)
-
-    @property
-    def _usb_phase(self) -> PhaseInfo:
         if self.device is None:
             return PhaseInfo(NO_PHONE, None, None)
         if self.active is not None:
@@ -220,20 +195,11 @@ class RelayEngine:
             return PhaseInfo(READY, self.device, None)
         return PhaseInfo(CONNECTING, self.device, None, self.usb_detail)
 
-    @property
-    def bundled_apk(self) -> Optional[str]:
-        return self._bundled_apk if self._bundled_apk and os.path.isfile(self._bundled_apk) else None
-
-    @property
-    def phone_app_is_outdated(self) -> bool:
-        have, bundled = self.phone_version, self.bundled_phone_version
-        return bool(have and bundled and version_less(have, bundled))
-
     # ---- lifecycle --------------------------------------------------------------------------
 
     def start(self) -> None:
         self._start_loop()
-        # If the polling thread ever stops making progress (adb wedged, a missed wake-up), say so
+        # If the polling thread ever stops making progress (USB wedged, a missed wake-up), say so
         # and start over instead of showing a stale state forever.
         self._arm_watchdog()
         self.log("Started.")
@@ -255,8 +221,7 @@ class RelayEngine:
         self._generation += 1
         gen = self._generation
         self._tick()
-        usb = self.transport == USB
-        t = threading.Thread(target=self._loop, args=(gen, usb), name="relay-loop", daemon=True)
+        t = threading.Thread(target=self._loop, args=(gen,), name="relay-loop", daemon=True)
         t.start()
         self._thread = t
 
@@ -268,10 +233,6 @@ class RelayEngine:
         if self._current_link is not None:
             self._current_link.close()
         self._wake.set()
-        if self.adb is not None and self.device is not None:
-            port = self.adb.existing_forward(self.device.serial, timeout=5)
-            if port is not None:
-                self.adb.remove_forward(port, self.device.serial, timeout=5)
 
     def check_again(self) -> None:
         """"Check Again" in the menu."""
@@ -322,129 +283,30 @@ class RelayEngine:
         with self._lock:
             return time.monotonic() - self._last_tick
 
-    def _loop(self, gen: int, usb: bool = False) -> None:
+    def _loop(self, gen: int) -> None:
         try:
-            if usb:
-                self._usb_loop_body(gen)
-            else:
-                self._loop_body(gen)
+            self._loop_body(gen)
         except Exception:
             # Let the watchdog notice (no more ticks) and start over.
             traceback.print_exc(file=sys.stderr)
 
-    def _loop_body(self, gen: int) -> None:
-        last_check = float("-inf")
-        port: Optional[int] = None
-        ready: Optional[Device] = None
-        adb: Optional[Adb] = None
-        while not self._stopping and gen == self._generation:
-            self._tick()
-            self._wake.clear()
-            with self._lock:
-                due = self._force_check or time.monotonic() - last_check >= self._check_interval
-                self._force_check = False
-
-            if due:
-                last_check = time.monotonic()
-                located = self._locate(self.prefs.adb_path)
-                found = Adb(located) if located else None
-                adb = found
-                devs: List[Device] = []
-                chosen: Optional[Device] = None
-                version: Optional[str] = None
-                port = None
-                if found is not None:
-                    devs = found.devices()
-                    chosen = self._choose(devs)
-                    if chosen is not None:
-                        version = found.installed_version(chosen.serial, PHONE_PACKAGE)
-                        if version is not None:
-                            port = found.ensure_forward(chosen.serial)
-                ready = chosen if (version is not None and port is not None) else None
-                self._tick()
-                self.host.post(lambda f=found, d=devs, c=chosen, v=version, g=gen:
-                               self._publish(f, d, c, v) if g == self._generation else None)
-
-            if port is not None and ready is not None and adb is not None:
-                link = PhoneLink()
-                closed = threading.Event()
-                device = ready
-                link.on_message = lambda msg, l=link, d=device: self._handle(msg, l, d)
-
-                def on_close(l=link, ev=closed):
-                    self.host.post(lambda: self._link_closed(l))
-                    ev.set()
-
-                link.on_close = on_close
-                if link.open(port):
-                    self.host.post(lambda l=link: self._link_opened(l))
-                    # adb can hold a connection open without it reaching the phone (for instance
-                    # while a replugged phone is still reconnecting), so keep checking that the
-                    # phone is really there rather than waiting for the link to end on its own.
-                    while not closed.wait(self._link_recheck):
-                        self._tick()
-                        if self._stopping or gen != self._generation:
-                            link.close()
-                            break
-                        here = adb.devices()
-                        if not any(d.serial == device.serial and d.is_usable for d in here):
-                            link.close()
-                            break
-                    last_check = float("-inf")  # look at the phone again straight away
-                    continue
-            self._wake.wait(1)
-
-    def _choose(self, devs: List[Device]) -> Optional[Device]:
-        usable = [d for d in devs if d.is_usable]
-        selected = self.prefs.selected_serial
-        if selected:
-            for d in usable:
-                if d.serial == selected:
-                    return d
-        return usable[0] if usable else None
-
     # ---- UI-thread publishing ---------------------------------------------------------------
-
-    def _publish(self, adb: Optional[Adb], devices: List[Device], device: Optional[Device],
-                 version: Optional[str]) -> None:
-        old_path = self.adb.path if self.adb else None
-        new_path = adb.path if adb else None
-        changed = (old_path != new_path or self.devices != devices or self.device != device
-                   or self.phone_version != version)
-        if old_path != new_path:
-            self.log("adb not found." if adb is None else "Using adb at %s." % adb.path)
-        if self.devices != devices and devices:
-            self.log("adb lists: " + ", ".join("%s (%s)" % (d.serial, d.state) for d in devices))
-        if self.device != device:
-            self.log("Phone: %s (%s)" % (device.title, device.serial) if device else "No phone.")
-        if self.phone_version != version and device is not None:
-            self.log("Login Relay %s is on the phone." % version if version is not None
-                     else "Login Relay isn't on the phone.")
-        self.adb = adb
-        self.devices = devices
-        self.device = device
-        self.phone_version = version
-        if changed:
-            self._changed()
-        if (device is None or version is None) and self.active is not None:
-            self.cancel_active("Phone not available", notify_phone=False)
 
     def _link_opened(self, link) -> None:
         if link.closed:
             return  # already over (its close notice may have been handled first); nothing to track
         self._current_link = link
         self.linked = True
-        self.log("USB connection open." if isinstance(link, UsbPhoneLink) else "Linked to Login Relay on the phone.")
+        self.log("USB connection open.")
         self._changed()
 
     def _link_closed(self, link) -> None:
         if self._current_link is link:
             self._current_link = None
             self.linked = False
-            if isinstance(link, UsbPhoneLink):
-                self.usb_alive = False
-                self.usb_ever_alive = False
-                self.phone_version = None
+            self.usb_alive = False
+            self.usb_ever_alive = False
+            self.phone_version = None
             self.log("Link to the phone closed.")
         if self.active is not None and self.active.link is link:
             self.cancel_active("The phone closed Login Relay.", notify_phone=False)
@@ -473,8 +335,7 @@ class RelayEngine:
             transport = msg.get("transport")
 
             def hello():
-                if device.is_usb:
-                    self.phone_version = version
+                self.phone_version = version
                 self.log("Login Relay %s on the phone says hello (%s)."
                          % (version if version is not None else "?",
                             transport if isinstance(transport, str) else "?"))
@@ -563,39 +424,18 @@ class RelayEngine:
             self.log("The page returned an error: %s" % params.get("error_description", params["error"]))
         self.log("Returning to %s on the phone…" % flow.request.app_name)
         self._changed()
-        if flow.device.is_usb:
-            # No adb here: the phone checks the result itself and hands it to the app.
-            self._awaiting_delivery = flow
-            _cancel(self._delivery_timer)
+        # The phone checks the result itself and hands it to the app, then says "delivered" (or "error").
+        self._awaiting_delivery = flow
+        _cancel(self._delivery_timer)
 
-            def not_confirmed():
-                if self._awaiting_delivery is None:
-                    return
-                self._awaiting_delivery = None
-                self.log("The phone didn't confirm it handed the result to the app.")
+        def not_confirmed():
+            if self._awaiting_delivery is None:
+                return
+            self._awaiting_delivery = None
+            self.log("The phone didn't confirm it handed the result to the app.")
 
-            self._delivery_timer = self.host.call_later(self._delivery_timeout, not_confirmed)
-            flow.link.send({"type": "callback", "url": callback})
-            return
-        adb = self.adb
-        if adb is None:
-            return
-
-        def work():
-            r = adb.deliver(flow.device.serial, callback, flow.request.caller)
-
-            def done():
-                if not r.ok or "Error" in r.out:
-                    self.log("The phone couldn't take the result: %s" % (r.out or r.err))
-                    flow.link.send({"type": "error", "text": "Couldn't hand the result back to the app."})
-                    return
-                self.log("Done: %s is finishing the %s." % (flow.request.app_name, flow.request.verb))
-                # Let the app's own screen take the result before Login Relay closes.
-                self.host.call_later(self._done_delay, lambda: flow.link.send({"type": "done"}))
-
-            self.host.post(done)
-
-        self._background(work)
+        self._delivery_timer = self.host.call_later(self._delivery_timeout, not_confirmed)
+        flow.link.send({"type": "callback", "url": callback})
 
     def _delivery_confirmed(self) -> None:
         flow = self._awaiting_delivery
@@ -658,95 +498,7 @@ class RelayEngine:
         if self.active is flow:
             self.cancel_active("Cancelled on the computer.", notify_phone=True)
 
-    # ---- phone-side app management ----------------------------------------------------------
-
-    def _background(self, fn: Callable[[], None]) -> None:
-        threading.Thread(target=fn, name="relay-work", daemon=True).start()
-
-    def install_phone_app(self) -> None:
-        adb, device, apk = self.adb, self.device, self.bundled_apk
-        if adb is None or device is None or apk is None:
-            return
-        self.busy = "Installing Login Relay on %s…" % device.title
-        self.log(self.busy)
-        self._changed()
-
-        def work():
-            r = adb.install(device.serial, apk)
-
-            def done():
-                self.busy = None
-                if r.ok and "Success" in r.out:
-                    self.log("Installed.")
-                else:
-                    why = " ".join(x for x in (r.out, r.err) if x)
-                    self.log("Install failed: %s" % why)
-                    self.host.show_error("Couldn't install Login Relay on the phone", why)
-                self._changed()
-                self.refresh_now()
-
-            self.host.post(done)
-
-        self._background(work)
-
-    def open_on_phone(self) -> None:
-        adb, device = self.adb, self.device
-        if adb is None or device is None:
-            return
-        self._background(lambda: adb.shell(
-            device.serial, "input keyevent KEYCODE_WAKEUP; am start -n %s/.RelayActivity" % PHONE_PACKAGE))
-
-    def download_platform_tools(self) -> None:
-        from . import installer
-        self.busy = "Downloading Android platform-tools…"
-        self.log(self.busy)
-        self._changed()
-
-        def work():
-            failure = None
-            try:
-                installer.install(self._log_async)
-            except Exception as e:
-                failure = str(e) or e.__class__.__name__
-
-            def done():
-                self.busy = None
-                if failure is not None:
-                    self.log("Download failed: %s" % failure)
-                    self.host.show_error("Couldn't download platform-tools", failure)
-                self._changed()
-                self.refresh_now()
-
-            self.host.post(done)
-
-        self._background(work)
-
     # ---- USB accessory mode -----------------------------------------------------------------
-
-    def set_transport(self, transport: str) -> None:
-        """Switches between adb and USB accessory mode."""
-        if transport not in (ADB, USB) or transport == self.transport:
-            return
-        self.cancel_active("Switching connection type.", notify_phone=True)
-        _cancel(self._delivery_timer)
-        self._awaiting_delivery = None
-        if self._current_link is not None:
-            self._current_link.close()
-            self._current_link = None   # its late close notice then changes nothing
-        self.prefs.transport = transport
-        self.adb = None
-        self.devices = []
-        self.device = None
-        self.phone_version = None
-        self.linked = False
-        self.usb_candidates = []
-        self.usb_alive = False
-        self.usb_ever_alive = False
-        self.usb_detail = ""
-        self.log("Connecting over USB accessory mode (no USB debugging needed)." if transport == USB
-                 else "Connecting over adb.")
-        self._start_loop()
-        self._changed()
 
     def select_usb(self, location: str) -> None:
         self.prefs.usb_selected = location
@@ -780,9 +532,23 @@ class RelayEngine:
                 self.cancel_active("Login Relay on the phone stopped answering.", notify_phone=False)
         self._changed()
 
-    def _usb_loop_body(self, gen: int) -> None:
-        """Background loop for USB accessory mode: find a phone, switch it to accessory mode, open the
-        pipe, and keep it open until the cable comes out."""
+    def _release_adb(self, why: str) -> None:
+        """The phone was busy (something else has its USB interface). The usual culprit is a running adb
+        server, so ask it to stop. Best effort, rate-limited, and silent if there is no adb."""
+        if time.monotonic() - self._last_adb_stop < self._adb_stop_interval:
+            return
+        self._last_adb_stop = time.monotonic()
+        try:
+            ran = self._stop_adb()
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            ran = False
+        if ran:
+            self._log_async("%s Stopped the adb server that was probably holding it." % why)
+
+    def _loop_body(self, gen: int) -> None:
+        """Background loop: find a phone, switch it to accessory mode, open the pipe, and keep it open
+        until the cable comes out."""
         backend = self._usb_backend
         last_switch: Dict[str, float] = {}
 
@@ -838,7 +604,7 @@ class RelayEngine:
                 publish(None, candidates, "Choose which phone to use from the menu." if len(candidates) > 1 else "")
                 pause(self._usb_idle_pause)
                 continue
-            device = Device("usb:" + target.id, "device", target.name.replace(" ", "_"))
+            device = Device("usb:" + target.id, target.name.replace(" ", "_"))
 
             if not target.is_accessory:
                 last = last_switch.get(target.location)
@@ -852,6 +618,8 @@ class RelayEngine:
                 except Exception as e:
                     traceback.print_exc(file=sys.stderr)
                     r = usbaoa.SwitchResult(usbaoa.AOA_ERR_IO, 0, str(e))
+                if r.code == usbaoa.AOA_ERR_BUSY:
+                    self._release_adb("%s is busy." % target.name)
                 if r.code != usbaoa.AOA_OK:
                     publish(device, candidates, usbaoa.error_text(r.code, target.name, r.detail))
                     pause(self._usb_error_pause)
@@ -887,12 +655,16 @@ class RelayEngine:
                 except Exception as e:
                     traceback.print_exc(file=sys.stderr)
                     failure = usbaoa.UsbError(usbaoa.AOA_ERR_OPEN, str(e))
+                if failure.code == usbaoa.AOA_ERR_BUSY:
+                    self._release_adb("%s is busy." % target.name)
                 if failure.code in (usbaoa.AOA_ERR_PERMISSION, usbaoa.AOA_ERR_UNAVAILABLE):
                     publish(device, candidates, usbaoa.error_text(failure.code, target.name, failure.detail))
                     break   # retrying won't help
                 if attempt == self._usb_open_attempts - 1:
                     publish(device, candidates,
-                            "Couldn't open the accessory connection (error %d)." % failure.code)
+                            usbaoa.error_text(failure.code, target.name, failure.detail)
+                            if failure.code == usbaoa.AOA_ERR_BUSY
+                            else "Couldn't open the accessory connection (error %d)." % failure.code)
                 time.sleep(self._usb_open_wait)
             if conn is None:
                 pause(self._usb_error_pause)
@@ -925,14 +697,6 @@ class RelayEngine:
                     break
             closed.wait(2)      # let the pipe be released before the next open
 
-    def select_device(self, serial: str) -> None:
-        self.prefs.selected_serial = serial
-        self.refresh_now()
-
-    def choose_adb(self, path: str) -> None:
-        self.prefs.adb_path = path
-        self.refresh_now()
-
     # ---- notifications ----------------------------------------------------------------------
 
     def notify(self, title: str, body: str) -> None:
@@ -943,70 +707,32 @@ class RelayEngine:
         self.host.show_error(title, detail)
 
 
-# ---- bundled phone app -----------------------------------------------------------------------
-
-def find_bundled(env=None) -> Tuple[Optional[str], Optional[str]]:
-    """(path of login-relay.apk, its version) as shipped with this app, if present."""
-    apk = find_share_file("login-relay.apk", env)
-    version = None
-    vf = find_share_file("phone-app-version.txt", env)
-    if vf:
-        try:
-            with open(vf, encoding="utf-8") as f:
-                version = f.read().strip() or None
-        except OSError:
-            pass
-    return apk, version
-
-
-# ---- text and layout shared by the window and the menu (ActivityWindowController.describe etc.) ----
+# ---- text and layout shared by the window and the menu (ActivityWindow.describe etc.) ----
 
 def describe(engine: RelayEngine) -> Tuple[str, str]:
     """Headline and one line of explanation for the current phase."""
-    if engine.busy:
-        return engine.busy, "This takes a moment."
     ph = engine.phase
     d = ph.device
-    if ph.kind == NO_ADB:
-        return ("adb not found", "Login Relay talks to the phone through adb, part of Android platform-tools.")
     if ph.kind == NO_PHONE:
-        if engine.transport == USB:
-            if len(engine.usb_candidates) > 1:
-                return ("More than one phone found over USB",
-                        engine.usb_detail or "Choose which phone to use from the menu.")
-            return ("No phone found over USB",
-                    engine.usb_detail or
-                    "Plug the phone in and choose \u201cFile transfer\u201d in its USB notification. "
-                    "USB debugging isn't needed.")
-        return ("No phone connected",
-                "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).")
+        if len(engine.usb_candidates) > 1:
+            return ("More than one phone found over USB",
+                    engine.usb_detail or "Choose which phone to use from the menu.")
+        return ("No phone found over USB",
+                engine.usb_detail or
+                "Plug the phone in and choose \u201cFile transfer\u201d in its USB notification. "
+                "USB debugging isn't needed.")
     if ph.kind == CONNECTING:
         # Once the USB pipe is open the phone is plugged in and connected; it's just not answering yet.
-        return ("%s is connected over USB" % d.title if engine.linked else "Connecting to %s…" % d.title,
+        return ("%s is connected over USB" % d.title if engine.linked else "Connecting to %s\u2026" % d.title,
                 ph.detail or "Waiting for the phone.")
-    if ph.kind == UNAUTHORIZED:
-        if d.state == "unauthorized":
-            return ("%s is waiting for you" % d.title, "Tap Allow on the phone's \"Allow USB debugging?\" prompt.")
-        return ("%s isn't responding (%s)" % (d.title, d.state),
-                "Unplug the cable and plug it back in, then choose Check Again.")
-    if ph.kind == NEEDS_APP:
-        return ("Login Relay isn't on %s" % d.title,
-                "Install it on the phone to start." if engine.bundled_apk
-                else "Install login-relay.apk on the phone.")
     if ph.kind == READY:
-        outdated = (" An update for the phone app is available."
-                    if engine.transport == ADB and engine.phone_app_is_outdated else "")
-        return ("%s is ready" % d.title, "Sign in to an app on the phone and the page opens here.%s" % outdated)
+        return ("%s is ready" % d.title, "Sign in to an app on the phone and the page opens here.")
     flow = ph.flow
     return ("%s %s in progress" % (flow.request.app_name, flow.request.verb),
             "Finish in your browser. If it asks to open Login Relay, allow it.")
 
 
 # Action ids understood by the UI layer.
-A_DOWNLOAD = "download_platform_tools"
-A_CHOOSE_ADB = "choose_adb"
-A_INSTALL = "install_phone_app"
-A_OPEN = "open_on_phone"
 A_CANCEL = "cancel"
 A_CHECK = "check_again"
 A_SHOW = "show_activity"
@@ -1014,45 +740,22 @@ A_LAUNCH_AT_LOGIN = "toggle_launch_at_login"
 A_NOTIFY = "toggle_notifications"
 A_ABOUT = "about"
 A_QUIT = "quit"
-A_SELECT_PHONE = "select_phone"
 A_SELECT_USB = "select_usb_phone"
-A_SET_TRANSPORT = "set_transport"
 
 
-def window_actions(engine: RelayEngine) -> Tuple[Optional[Tuple[str, str]], Optional[Tuple[str, str]], bool]:
-    """(primary button, secondary button, enabled) for the activity window; a button is (label, action)."""
-    primary = secondary = None
+def window_actions(engine: RelayEngine) -> Tuple[Optional[Tuple[str, str]], Optional[Tuple[str, str]]]:
+    """(primary button, secondary button) for the activity window; a button is (label, action)."""
     ph = engine.phase
-    if ph.kind == NO_ADB:
-        primary, secondary = ("Download Platform-Tools…", A_DOWNLOAD), ("Choose adb…", A_CHOOSE_ADB)
-    elif ph.kind == NEEDS_APP:
-        if engine.bundled_apk:
-            primary = ("Install on Phone", A_INSTALL)
-    elif ph.kind == READY:
-        # Opening and updating the phone app go through adb, so they're for the adb connection only.
-        if engine.transport == ADB:
-            primary = ("Open on Phone", A_OPEN)
-            if engine.phone_app_is_outdated:
-                secondary = ("Update on Phone", A_INSTALL)
-    elif ph.kind == WORKING:
-        primary = ("Cancel", A_CANCEL)
-    else:  # no phone, unauthorized, connecting
-        primary = ("Check Again", A_CHECK)
-    return primary, secondary, engine.busy is None
-
-
-def transport_choices(engine: RelayEngine) -> Tuple["MenuEntry", ...]:
-    """The "Connect Over" choices: how the computer reaches the phone. Used by the tray menu (as a
-    submenu) and by the window (as a drop-down)."""
-    current = engine.transport
-    return tuple(MenuEntry("toggle", label, A_SET_TRANSPORT, t, checked=(t == current))
-                 for t, label in ((ADB, "adb (needs USB debugging)"),
-                                  (USB, "USB accessory (no USB debugging) \u2014 beta")))
+    if ph.kind == READY:
+        return None, None
+    if ph.kind == WORKING:
+        return ("Cancel", A_CANCEL), None
+    return ("Check Again", A_CHECK), None   # no phone, connecting
 
 
 def usb_phone_choices(engine: RelayEngine) -> Tuple["MenuEntry", ...]:
-    """In USB mode with several candidate phones: one entry per phone, the chosen one checked."""
-    if engine.transport != USB or len(engine.usb_candidates) <= 1:
+    """With several candidate phones: one entry per phone, the chosen one checked."""
+    if len(engine.usb_candidates) <= 1:
         return ()
     current = engine.device.serial if engine.device is not None else None
     return tuple(MenuEntry("toggle", "%s (%s)" % (p.name, p.id) if p.name else p.id, A_SELECT_USB, p.id,
@@ -1077,41 +780,22 @@ def menu_model(engine: RelayEngine, launch_at_login: bool = False) -> Tuple[Menu
     ph = engine.phase
     good = ph.kind in (READY, WORKING)
     items.append(MenuEntry("status", status, good=good))
-    if not good and engine.busy is None:
+    if not good:
         items.append(MenuEntry("hint", detail))
     items.append(MenuEntry("separator"))
 
-    if engine.busy is None:
-        if ph.kind == NO_ADB:
-            items.append(MenuEntry("action", "Download Android Platform-Tools…", A_DOWNLOAD))
-            items.append(MenuEntry("action", "Choose adb…", A_CHOOSE_ADB))
-        elif ph.kind == NEEDS_APP:
-            if engine.bundled_apk:
-                items.append(MenuEntry("action", "Install Login Relay on Phone", A_INSTALL))
-        elif ph.kind == READY:
-            if engine.transport == ADB:
-                items.append(MenuEntry("action", "Open Login Relay on Phone", A_OPEN))
-                if engine.phone_app_is_outdated and engine.phone_version and engine.bundled_phone_version:
-                    items.append(MenuEntry("action", "Update Login Relay on Phone (%s → %s)"
-                                           % (engine.phone_version, engine.bundled_phone_version), A_INSTALL))
-        elif ph.kind == WORKING:
-            items.append(MenuEntry("action", "Cancel %s" % ph.flow.request.verb, A_CANCEL))
-        else:
-            items.append(MenuEntry("action", "Check Again", A_CHECK))
+    if ph.kind == WORKING:
+        items.append(MenuEntry("action", "Cancel %s" % ph.flow.request.verb, A_CANCEL))
+    elif ph.kind != READY:
+        items.append(MenuEntry("action", "Check Again", A_CHECK))
 
     usb_phones = usb_phone_choices(engine)
     if usb_phones:
         items.append(MenuEntry("submenu", "Phone", children=usb_phones))
-    usable = [d for d in engine.devices if d.is_usable]
-    if len(usable) > 1:
-        kids = tuple(MenuEntry("toggle", "%s (%s)" % (d.title, d.serial), A_SELECT_PHONE, d.serial,
-                               checked=(d == engine.device)) for d in usable)
-        items.append(MenuEntry("submenu", "Phone", children=kids))
     if items[-1].kind != "separator":
         items.append(MenuEntry("separator"))
 
-    items.append(MenuEntry("submenu", "Connect Over", children=transport_choices(engine)))
-    items.append(MenuEntry("action", "Show Activity…", A_SHOW))
+    items.append(MenuEntry("action", "Show Activity\u2026", A_SHOW))
     items.append(MenuEntry("separator"))
     items.append(MenuEntry("toggle", "Launch at Login", A_LAUNCH_AT_LOGIN, checked=launch_at_login))
     items.append(MenuEntry("toggle", "Notify When a Sign-in Arrives", A_NOTIFY, checked=engine.prefs.notifications))

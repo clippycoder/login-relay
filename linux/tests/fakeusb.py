@@ -374,9 +374,9 @@ def phone_interfaces():
     return [FakeInterface(0, 0xFF, 0xFF, 0x00), FakeInterface(1, 0xFF, 0x42, 0x01)]
 
 
-def accessory_interfaces(with_adb=False):
+def accessory_interfaces(with_extra_interface=False):
     eps = [FakeEndpoint(0x81, 0x02, None), FakeEndpoint(0x01, 0x02, None)]
     out = [FakeInterface(0, 0xFF, 0x00, 0x00, eps)]
-    if with_adb:
+    if with_extra_interface:
         out.append(FakeInterface(1, 0xFF, 0x42, 0x01, [FakeEndpoint(0x82, 0x02, None), FakeEndpoint(0x02, 0x02, None)]))
     return out

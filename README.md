@@ -13,13 +13,14 @@ Login Relay fixes that without putting a browser on the phone: the sign-in page 
 computer's** browser instead, and the result goes back to the app.
 
 ```
- phone                                   computer (over adb)
+ phone                                   computer (over the USB cable)
  app: "open the sign-in page"
  Login Relay answers as the browser ──▶  the desktop app opens the page in your normal browser
                                           you sign in there
                                           the site redirects to the app's return address
                                           the desktop app catches it (temporary URL handler)
- app finishes the sign-in itself   ◀──   adb shell am start <return address> -p <app>
+ Login Relay checks it, gives it   ◀──   the desktop app sends the return address back
+ to the app, which finishes the login
 ```
 
 The page never loads on the phone. The app finishes the login with its own code, so it stores the
@@ -39,20 +40,27 @@ desktop app.
 
 Each release lists SHA-256 checksums in `SHA256SUMS`.
 
+**Versions 0.5.0 and later talk to the phone only over USB, in Android's USB accessory mode, and need no
+USB debugging.** If you'd rather use adb (USB debugging or wireless debugging), the
+[v0.4.0 release](https://github.com/clippycoder/login-relay/releases/tag/v0.4.0) and its phone app still
+do that.
+
 ## Use it
 
-Plug the phone in with USB and turn on USB debugging (Settings → Developer options); accept the
-"Allow USB debugging?" prompt on the phone. Then:
+1. **Install Login Relay on the phone.** It's an ordinary APK with no permissions: install it however you
+   install apps (your MDM, a file manager, `adb install`). It's also bundled in each desktop download.
+2. **Start the desktop app.** It lives in the menu bar / system tray and shows the phone's state.
+3. **Plug the phone in with USB.** If the desktop app says it can't find a phone, pull down the phone's USB
+   notification and choose **File transfer**. USB debugging is **not** needed. The first time, Android asks
+   whether to let Login Relay use the accessory; tap OK (tick "Use by default" to skip it next time).
+4. **Sign in to an app on the phone as usual.** When it opens the sign-in page, Login Relay sends it to
+   your computer and your browser opens it. Sign in there. If your browser asks to open "Login Relay",
+   allow it. The app on the phone finishes the login.
 
-1. **Start the desktop app.** It lives in the menu bar / system tray and shows the phone's state.
-2. **Install Login Relay on the phone**: the desktop app bundles the APK and offers to install it
-   (menu → *Install Login Relay on Phone*).
-3. **Sign in to an app on the phone as usual.** When it opens the sign-in page, Login Relay sends it
-   to your computer and your browser opens it. Sign in there. If your browser asks to open "Login
-   Relay", allow it. The app on the phone finishes the login.
-
-If adb isn't installed, the desktop app offers to download Google's platform-tools (checked against
-Google's published checksum). You can also point it at an adb you already have.
+This is Android's USB accessory mode (the protocol Android Auto uses): the desktop app asks the phone to
+re-enumerate as an accessory, then talks to the Login Relay app over it. The phone checks the sign-in
+result itself (same return address, same `state`) before handing it to the app. If an adb server is
+running and holding the phone, the desktop app stops it (it restarts when needed).
 
 The menu has **Launch at Login**, **Notify When a Sign-in Arrives**, and **Show Activity…**, a window
 with a log. On macOS there is also **Show in Dock** (off by default, so it lives only in the menu bar).
@@ -64,34 +72,20 @@ developer account behind it), so macOS blocks the first launch: right-click the 
 or open System Settings → Privacy & Security and choose **Open Anyway**, or clear the flag once with
 `xattr -dr com.apple.quarantine "/Applications/Login Relay.app"`.
 
-### USB accessory mode (beta): no USB debugging
-
-By default Login Relay talks to the phone through adb, which needs USB debugging. In the Mac app's menu
-choose **Connect Over → USB accessory** and it uses Android's USB accessory mode (the protocol Android Auto
-uses) instead: no Developer options, no USB debugging, and the phone app still asks for no permissions. The
-first time, Android asks whether to let Login Relay use the accessory; tap OK (tick "Use by default" to skip
-it next time). If the Mac says "No phone found over USB", pick "File transfer" in the phone's USB
-notification.
-
-In this mode the phone checks the sign-in result itself (same return address, same `state`) before handing it
-to the app, so nothing needs adb at all.
-
-Status: sign-in and sign-out work on one phone (a CAT S22 Flip, Android 11) that **also had USB debugging
-on**. **Not yet tested with USB debugging off**, where the phone may not appear on the cable until you pick
-"File transfer". An adb server holds a phone exclusively and blocks the switch, so the Mac app stops the adb
-server when it hits that (it restarts when needed). macOS has it first; Linux has it too but has only been
-tested against a simulated phone (pick **Connect over → USB accessory**; the .deb installs a udev rule that
-gives you access to the phone). Windows has it too, **never yet run with a real phone**, and needs a one-time
-driver install: Windows' stock phone drivers can't be used for this, so the app walks you through installing
-WinUSB with [Zadig](https://zadig.akeo.ie/) twice (for the phone, then for the "Android Accessory Interface"
-that appears after the switch). A **Connect Over** menu entry in the tray app turns it on; adb mode needs no
-driver.
-
 ### Windows
 
 Unzip and run `LoginRelay.exe` (keep `login-relay.apk` next to it). It isn't code-signed, so SmartScreen
 may say "Windows protected your PC": choose *More info* → *Run anyway*. **Launch at Login** adds a
 per-user startup entry.
+
+**Windows drivers.** This needs proper USB drivers, and the app doesn't install them. It talks to the phone
+through libusb, which can only open devices that use the **WinUSB** driver, and Windows' stock phone driver
+(MTP) isn't one. Install WinUSB for the phone with [Zadig](https://zadig.akeo.ie/) (Options → List All
+Devices, pick the phone, choose WinUSB, Replace Driver). After the app first switches the phone into accessory
+mode, a second device, "Android Accessory Interface" (USB ID `18D1:2D00`–`2D05`), appears and needs WinUSB
+too. If the app says "Can't open the phone", a missing driver is the likely reason. Installing WinUSB for the
+phone takes over its normal Windows connection (file transfer) until you restore the driver in Device
+Manager. Not yet tried with a real phone on Windows, so treat these steps as unverified.
 
 ### Linux
 
@@ -99,15 +93,16 @@ per-user startup entry.
 sudo apt install ./loginrelay_<version>_all.deb        # Debian, Ubuntu, and derivatives
 ```
 
-or unpack the tarball and run `./install.sh` for a per-user install under `~/.local`. The tray icon uses
+or unpack the tarball and run `./install.sh` for a per-user install under `~/.local`. The package needs
+`python3-usb` and installs a udev rule that lets the logged-in user use the phone. The tray icon uses
 AppIndicator, so it needs a desktop that shows those: KDE does; **GNOME needs the "AppIndicator and
 KStatusNotifierItem Support" extension**. Without a tray the app keeps its window open instead, with
 the same actions.
 
-### No desktop app? The command-line helper
+### No desktop app? The command-line helper (adb)
 
-A Python script does the same job with no tray or window. With Login Relay installed on the phone and
-the phone connected over adb:
+An older Python script does the same job with no tray or window, but over adb (USB debugging on). With
+Login Relay installed on the phone and the phone connected over adb:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/clippycoder/login-relay/main/relay.sh | sh
@@ -123,12 +118,13 @@ Links that aren't sign-ins, such as a "terms of service" link, also open on the 
 
 | | Phone | Desktop |
 |---|---|---|
-| macOS | tested on a CAT S22 Flip (Android 11) with real sign-ins and sign-outs | used with real apps; unit tests and an end-to-end test run in CI |
+| macOS | tested on a CAT S22 Flip (Android 11) with real sign-ins and sign-outs, USB debugging on; the USB link also works with USB debugging off | used with real apps; unit tests and an end-to-end test run in CI |
+| Linux | same phone, from the Linux USB code run on a Mac: the phone switches to accessory mode and answers, with USB debugging on and off | built and tested in CI on a real Linux machine under a virtual display against a fake phone; **not yet run on a Linux desktop with a real phone** |
 | Windows | – | built and tested in CI on a real Windows machine against a fake phone; **not yet run with a real phone** |
-| Linux | – | built and tested in CI on a real Linux machine under a virtual display against a fake phone; **not yet run with a real phone** |
 
-Not verified anywhere: *Launch at Login*, notifications, and the platform-tools download. Reports and
-fixes are welcome.
+Tested with the phone in "File transfer" USB mode. A phone whose default USB mode is "Charging only" may
+not show up until you choose File transfer; that hasn't been tried. Not verified anywhere: *Launch at
+Login* and notifications. Reports and fixes are welcome.
 
 ## How it stays safe
 
@@ -137,14 +133,14 @@ fixes are welcome.
   and asks before relaying a sign-in that doesn't use PKCE.
 - **State check.** The computer only accepts a return address whose `state` matches the sign-in it
   opened, and it ignores anything else.
-- **Delivered only to the app that asked.** The return address goes back with `-p <package>` of
-  the app that opened the page.
-- **Only adb can talk to the phone app.** Login Relay serves on an abstract unix socket, and it
-  refuses peers that aren't the `shell` or `root` user, so other apps can't read the pages.
+- **Delivered only to the app that asked.** The phone hands the return address to the app that opened
+  the page and to no other.
+- **Only the cable can talk to the phone app.** Over USB the phone app accepts only the accessory the
+  system attached for Login Relay; other apps on the phone can't reach it.
 - **Nothing left behind on the computer.** The URL handler is registered for one login and then
   removed. If another app already handled that scheme, it is restored; a claim left by a crash is
   cleaned up on the next launch.
-- **The phone vets results in USB mode.** The phone only hands an app a result that matches the page it opened
+- **The phone vets results.** The phone only hands an app a result that matches the page it opened
   (same return address and `state`), so nothing else on the cable can feed an app a login result.
 - **Only web links are opened in the browser.** A `file:` or custom-scheme address supplied by the phone
   is refused, so it can't launch an arbitrary program on the computer.
@@ -168,7 +164,8 @@ system refuses the claim.
 
 Login Relay is an ordinary app with no permissions, so it can be distributed through an MDM like
 any other in-house APK. An MDM that removes sideloaded apps will also remove a copy installed with
-`adb install`, so add it through the console instead.
+`adb install`, so add it through the console instead. Over USB the desktop apps need no developer
+options on the phone.
 
 | | |
 |---|---|
@@ -176,9 +173,6 @@ any other in-house APK. An MDM that removes sideloaded apps will also remove a c
 | Signing certificate SHA-256 | `d4:3d:3e:98:27:12:3a:56:f0:92:39:e5:32:40:a6:94:b1:ff:8a:3f:73:af:0a:a7:2d:92:e5:42:a1:40:c8:b4` |
 | Permissions | none |
 | Icon for the console | [`docs/icon-512.png`](docs/icon-512.png) |
-
-The phone also needs USB debugging (or wireless debugging) allowed while you sign in, because the
-hand-off runs over adb.
 
 ## Limits
 
@@ -215,27 +209,26 @@ Updates must be signed with the same key as the installed version, so keep the r
 
 - `tests/vectors.json` holds the cases for classifying sign-in pages and matching return addresses. The
   Swift, C# and Python implementations all run it.
-- `tests/e2e/` is a fake phone, a fake adb and a driver that plays the browser, so a whole desktop app
-  can be tested end to end with no phone: a sign-in with a decoy return address, a sign-out, and a cancel
+- `tests/e2e/` is a fake phone (the USB-mode protocol over a socket) and a driver that plays the browser,
+  so a whole desktop app can be tested end to end with no phone: a sign-in with a decoy return address, a sign-out, and a cancel
   from the phone. GitHub Actions runs it against the real app on macOS, Windows and Linux.
 - `docs/PORTING.md` describes the behaviour a desktop app must match.
 
 ## Protocol
 
-The phone app listens on the abstract unix socket `@oauthrelay` and accepts only uid 0 or 2000.
-The computer reaches it with `adb forward tcp:0 localabstract:oauthrelay`. Messages are newline-delimited
-JSON:
+Over the USB cable (Android Open Accessory), messages are newline-delimited JSON:
 
 | direction | message |
 |---|---|
-| phone → computer | `{"v":1,"type":"open","url":…,"referrer":"android-app://<package>","label":"<app name>"}` (`label` since 0.3.0) |
-| phone → computer | `{"type":"cancel"}` |
-| computer → phone | `{"type":"status","text":…}`, `{"type":"error","text":…}`, `{"type":"done"}` |
+| phone → computer | `{"v":1,"type":"hello","transport":"usb","version":…}` once per connection |
+| phone → computer | `{"v":1,"type":"open","url":…,"referrer":"android-app://<package>","label":"<app name>"}` |
+| phone → computer | `{"type":"cancel"}`, `{"type":"pong"}`, `{"type":"delivered"}`, `{"type":"error","text":…}` |
+| computer → phone | `{"type":"status","text":…}`, `{"type":"error","text":…}`, `{"type":"done"}`, `{"type":"ping"}`, `{"type":"callback","url":…}` |
 
-USB accessory mode adds `hello`, `ping`/`pong`, `callback` and `delivered`; see
-[docs/PORTING.md](docs/PORTING.md#usb-accessory-mode-optional-second-transport).
+[docs/PORTING.md](docs/PORTING.md#usb-accessory-mode) has the details (switching, framing, liveness).
 
-The return address goes back with `adb shell am start -a android.intent.action.VIEW -d <url> -p <package>`.
+The phone app (0.4.0) also still serves the older adb transport (an abstract unix socket `@oauthrelay`
+reached with `adb forward`) so the v0.4.0 desktop apps and `relay.sh` keep working.
 
 ## License
 

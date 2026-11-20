@@ -205,101 +205,12 @@ namespace LoginRelay.Core.Tests
             Prompt = new FakePrompt(check, onCancel);
             return Prompt;
         }
-
-        public string? BundledApkPath
-        {
-            get { return null; }
-        }
-
-        public string? BundledPhoneVersion
-        {
-            get { return null; }
-        }
-    }
-
-    internal sealed class Delivery
-    {
-        public string Serial { get; }
-        public string Url { get; }
-        public string? Package { get; }
-
-        public Delivery(string serial, string url, string? package)
-        {
-            Serial = serial;
-            Url = url;
-            Package = package;
-        }
-    }
-
-    /// <summary>One phone, always connected and ready, listening on a fixed local port.</summary>
-    internal sealed class FakeAdb : IAdb
-    {
-        private readonly int _port;
-        private readonly object _lock = new object();
-        private readonly List<Delivery> _delivered = new List<Delivery>();
-
-        public FakeAdb(int port)
-        {
-            _port = port;
-        }
-
-        public Delivery[] Delivered
-        {
-            get { lock (_lock) { return _delivered.ToArray(); } }
-        }
-
-        public string ExePath
-        {
-            get { return "fake-adb"; }
-        }
-
-        public IReadOnlyList<Device> Devices()
-        {
-            return new List<Device> { new Device("FAKE0001", "device", "Fake_Phone") };
-        }
-
-        public string? InstalledVersion(string serial, string package)
-        {
-            return "0.3.0";
-        }
-
-        public int? ExistingForward(string serial)
-        {
-            return _port;
-        }
-
-        public int? Forward(string serial)
-        {
-            return _port;
-        }
-
-        public void RemoveForward(int port, string serial)
-        {
-        }
-
-        public ProcessResult Deliver(string serial, string url, string? package)
-        {
-            lock (_lock)
-            {
-                _delivered.Add(new Delivery(serial, url, package));
-            }
-            return new ProcessResult(0, "Starting: Intent { ... }", "");
-        }
-
-        public ProcessResult Install(string serial, string apk)
-        {
-            return new ProcessResult(0, "Success", "");
-        }
-
-        public ProcessResult Shell(string serial, string command, double timeoutSeconds = 20)
-        {
-            return new ProcessResult(0, "", "");
-        }
     }
 
     /// <summary>
-    /// The Login Relay app on the phone: accepts connections on a local port, sends its pending page to
-    /// each one until it hears "done", and records what it receives.
+    /// The Login Relay app on the phone, as the engine sees it through the LOGINRELAY_FAKE_PHONE socket: accepts
+    /// connections on a local port, says hello, answers pings with pongs, sends its pending page, confirms each
+    /// callback it receives with "delivered", and records what it receives.
     /// </summary>
     internal sealed class FakePhone : IDisposable
     {
@@ -312,6 +223,9 @@ namespace LoginRelay.Core.Tests
         public int Port { get; }
         public int CancelAfterMilliseconds { get; set; }
         public ConcurrentQueue<string> Received { get; } = new ConcurrentQueue<string>();
+
+        /// <summary>The "url" of each callback message the engine sent, in order.</summary>
+        public ConcurrentQueue<string> CallbackUrls { get; } = new ConcurrentQueue<string>();
 
         public FakePhone(string? pageUrl, string? referrer = "android-app://com.example.app", string label = "Example App")
         {
@@ -377,6 +291,7 @@ namespace LoginRelay.Core.Tests
                 try
                 {
                     NetworkStream stream = client.GetStream();
+                    Write(stream, "{\"v\":1,\"type\":\"hello\",\"transport\":\"usb\",\"version\":\"0.5.0\"}");
                     if (_openJson != null && !_done)
                     {
                         Write(stream, _openJson);
@@ -397,10 +312,30 @@ namespace LoginRelay.Core.Tests
                         string? line;
                         while ((line = reader.ReadLine()) != null)
                         {
+                            if (line.Length == 0)
+                            {
+                                continue;
+                            }
                             Received.Enqueue(line);
-                            if (line.Contains("\"type\":\"done\"", StringComparison.Ordinal))
+                            if (line.Contains("\"type\":\"ping\"", StringComparison.Ordinal))
+                            {
+                                Write(stream, "{\"type\":\"pong\"}");
+                            }
+                            else if (line.Contains("\"type\":\"done\"", StringComparison.Ordinal))
                             {
                                 _done = true;
+                            }
+                            else if (line.Contains("\"type\":\"callback\"", StringComparison.Ordinal))
+                            {
+                                using (System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(line))
+                                {
+                                    string? url = doc.RootElement.GetProperty("url").GetString();
+                                    if (url != null)
+                                    {
+                                        CallbackUrls.Enqueue(url);
+                                    }
+                                }
+                                Write(stream, "{\"type\":\"delivered\"}");
                             }
                         }
                     }

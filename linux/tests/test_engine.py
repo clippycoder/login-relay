@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Drives engine.py end to end on this machine: a fake Host, a fake claim, and the real
-tests/e2e/fake_adb.py + fake_phone.py started as subprocesses."""
+"""Drives engine.py end to end through the LOGINRELAY_FAKE_PHONE test hook: a fake Host, a fake claim, and
+a fake phone listening on a local TCP port, reached by the same USB-mode engine logic as a real phone."""
 import os
 import queue
 import shutil
@@ -9,13 +9,16 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import SCHEME, PACKAGE, FakeWorld, authorize_url, stable_fds, assert_fds_flat, wait_until  # noqa: E402
+from support import SCHEME, PACKAGE, FakePhoneServer, authorize_url, stable_fds, assert_fds_flat, wait_until  # noqa: E402
 
 from loginrelay import engine as eng  # noqa: E402
 from loginrelay.prefs import Prefs  # noqa: E402
+from loginrelay import fakephone  # noqa: E402
 from loginrelay.redirect import RelayRequest  # noqa: E402
+from loginrelay.usblink import UsbPhoneLink  # noqa: E402
 
 
 class FakeClaim:
@@ -98,20 +101,44 @@ class FakeHost(eng.Host):
 
 
 class EngineCase(unittest.TestCase):
-    engine_args = {}
+    engine_args = dict(usb_idle_pause=0.1, usb_recheck=0.2, usb_open_wait=0.05, usb_error_pause=0.3,
+                       delivery_timeout=3.0, usb_link_args=dict(ping_interval=0.2, silence=1.0))
 
     def setUp(self):
-        self.world = FakeWorld()
-        self.addCleanup(self.world.close)
+        saved = {k: os.environ.get(k) for k in ("LOGINRELAY_FAKE_PHONE", "LOGINRELAY_BROWSER")}
+        self.addCleanup(self._restore_env, saved)
+        os.environ["LOGINRELAY_BROWSER"] = "none"
+        os.environ.pop("LOGINRELAY_FAKE_PHONE", None)
+        self.phone = None
         self.host = FakeHost()
         self.addCleanup(self.host.stop)
         self.tmp = tempfile.mkdtemp(prefix="lr-eng-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.prefs = Prefs(os.path.join(self.tmp, "prefs.json"))
-        args = dict(check_interval=0.4, link_recheck=0.5, done_delay=0.3)
-        args.update(self.engine_args)
-        self.engine = eng.RelayEngine(self.host, self.prefs, **args)
+        self.adb_stops = []
         self.changes = 0
+
+    @staticmethod
+    def _restore_env(saved):
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def start_phone(self, **kw):
+        """Starts a fake phone and points the hook at it. Call before start()."""
+        self.phone = FakePhoneServer(**kw)
+        self.addCleanup(self.phone.stop)
+        os.environ["LOGINRELAY_FAKE_PHONE"] = self.phone.address
+        return self.phone
+
+    def make_engine(self, **extra):
+        args = dict(self.engine_args)
+        args.update(extra)
+        # The engine gets no usb_backend: it must pick the fake phone up from the environment itself.
+        # stop_adb is stubbed so a test can never run a real `adb kill-server`.
+        self.engine = eng.RelayEngine(self.host, self.prefs, stop_adb=lambda: self.adb_stops.append(1) or True, **args)
 
         def changed():
             if not self.host.on_ui():
@@ -119,8 +146,10 @@ class EngineCase(unittest.TestCase):
             self.changes += 1
 
         self.engine.on_change = changed
+        return self.engine
 
-    def start(self):
+    def start(self, **extra):
+        self.make_engine(**extra)
         self.host.ask(self.engine.start)
         self.addCleanup(lambda: self.host.ask(self.engine.shutdown))
 
@@ -129,6 +158,9 @@ class EngineCase(unittest.TestCase):
 
     def logs(self):
         return [t for _, t in self.engine.log_lines]
+
+    def wait_log(self, text, timeout=10):
+        wait_until(lambda: text in self.logs(), timeout, "log line %r" % text)
 
     def wait_phase(self, kind, timeout=15):
         wait_until(lambda: self.engine.phase.kind == kind, timeout, "phase %s (is %s)" % (kind, self.engine.phase.kind))
@@ -144,7 +176,7 @@ class EngineCase(unittest.TestCase):
 class LoginTests(EngineCase):
     def test_sign_in_with_a_decoy_then_the_right_return_address(self):
         url, redirect = authorize_url("STATE-1")
-        self.world.start_phone("--url", url, "--label", "Example App")
+        phone = self.start_phone(url=url, label="Example App")
         self.prefs.notifications = True
         self.start()
         flow = self.wait_active()
@@ -155,15 +187,15 @@ class LoginTests(EngineCase):
         self.assertEqual(self.host.opened, [])
         self.assertIn(("Example App sign-in", "Continue in your browser."), self.host.notifications)
         self.assertIn("Example App wants to open a sign-in page at login.example.com.", self.logs())
-        wait_until(lambda: self.world.phone_messages("status"), 5, "the status line")
-        self.assertEqual(self.world.phone_messages("status")[0]["text"], "Finish signing in on your computer.")
+        wait_until(lambda: phone.messages("status"), 5, "the status line")
+        self.assertEqual(phone.messages("status")[0]["text"], "Finish signing in on your computer.")
 
         # A decoy with the wrong state, as a browser would hand it over: ignored.
         self.ui(lambda: self.engine.receive("%s?code=EVIL&state=other" % redirect))
         self.ui(lambda: self.engine.receive("com.other.app://x?state=STATE-1"))   # unrelated: silent
         time.sleep(0.5)
         self.assertIn("Ignored a return address from a different sign-in (state mismatch).", self.logs())
-        self.assertEqual(self.world.lines("am_calls.jsonl"), [])
+        self.assertEqual(phone.messages("callback"), [])
         self.assertIs(self.engine.active, flow)
         self.assertFalse(self.host.claims[0].released)
 
@@ -171,47 +203,62 @@ class LoginTests(EngineCase):
         self.ui(lambda: self.engine.receive(good))
         self.assertIsNone(self.engine.active)
         self.assertTrue(self.host.claims[0].released)
-        wait_until(lambda: self.world.lines("am_calls.jsonl"), 10, "the return address to reach the phone")
-        call = self.world.lines("am_calls.jsonl")[0]
-        self.assertEqual(call["-d"], good)
-        self.assertEqual(call["-p"], PACKAGE)
-        self.assertEqual(call["-a"], "android.intent.action.VIEW")
-        wait_until(lambda: self.world.phone_messages("done"), 10, "the phone to be told it's done")
-        self.assertIn("Returning to Example App on the phone…", self.logs())
-        self.assertIn("Done: Example App is finishing the sign-in.", self.logs())
+        wait_until(lambda: phone.messages("callback"), 10, "the return address to reach the phone")
+        self.assertEqual(phone.messages("callback"), [{"type": "callback", "url": good}])
+        self.wait_log("Done: Example App is finishing the sign-in.")
+        self.assertIn("Returning to Example App on the phone\u2026", self.logs())
         self.assertEqual(self.engine.phase.kind, eng.READY)
-        # The phone forgot its pending page, so a reconnect doesn't start another login.
-        time.sleep(1.2)
+        # The phone forgot its pending page, so nothing starts another login.
+        time.sleep(1.0)
         self.assertIsNone(self.engine.active)
-        self.assertEqual(len(self.world.lines("am_calls.jsonl")), 1)
+        self.assertEqual(len(phone.messages("callback")), 1)
 
     def test_sign_out(self):
         url, redirect = authorize_url("", kind="signout")
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         flow = self.wait_active()
         self.assertEqual(flow.request.verb, "sign-out")
-        wait_until(lambda: self.world.phone_messages("status"), 5, "the status line")
-        self.assertEqual(self.world.phone_messages("status")[0]["text"], "Finishing sign-out on your computer.")
+        wait_until(lambda: phone.messages("status"), 5, "the status line")
+        self.assertEqual(phone.messages("status")[0]["text"], "Finishing sign-out on your computer.")
         self.ui(lambda: self.engine.receive(redirect))
-        wait_until(lambda: self.world.lines("am_calls.jsonl"), 10, "am start")
-        self.assertEqual(self.world.lines("am_calls.jsonl")[0]["-d"], redirect)
-        wait_until(lambda: self.world.phone_messages("done"), 10, "done")
+        wait_until(lambda: phone.messages("callback"), 10, "the callback")
+        self.assertEqual(phone.messages("callback")[0]["url"], redirect)
         self.assertTrue(self.host.claims[0].released)
         self.assertEqual(self.host.notifications, [])   # notifications are off by default
 
     def test_page_with_error_is_reported_but_still_handed_over(self):
         url, redirect = authorize_url("S9")
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         self.wait_active()
         self.ui(lambda: self.engine.receive("%s?error=access_denied&error_description=No+way&state=S9" % redirect))
         self.assertIn("The page returned an error: No way", self.logs())
-        wait_until(lambda: self.world.lines("am_calls.jsonl"), 10, "am start")
+        wait_until(lambda: phone.messages("callback"), 10, "the callback")
+
+    def test_the_phone_reports_an_error_and_a_missing_confirmation_is_logged(self):
+        url, redirect = authorize_url("S10")
+        phone = self.start_phone(url=url, delivery_reply="error:That isn't the sign-in in progress.")
+        self.start(delivery_timeout=0.8)
+        self.wait_active()
+        self.ui(lambda: self.engine.receive("%s?code=X&state=S10" % redirect))
+        self.wait_log("The phone says: That isn't the sign-in in progress.")
+        self.assertNotIn("Done: Example App is finishing the sign-in.", self.logs())
+        time.sleep(1.2)
+        self.assertNotIn("The phone didn't confirm it handed the result to the app.", self.logs())
+
+    def test_delivery_timeout(self):
+        url, redirect = authorize_url("S11")
+        self.start_phone(url=url, delivery_reply=None)
+        self.start(delivery_timeout=0.6)
+        self.wait_active()
+        self.ui(lambda: self.engine.receive("%s?code=X&state=S11" % redirect))
+        self.wait_log("The phone didn't confirm it handed the result to the app.")
+        self.assertNotIn("Done: Example App is finishing the sign-in.", self.logs())
 
     def test_cancel_from_the_phone(self):
         url, redirect = authorize_url("STATE-2")
-        self.world.start_phone("--url", url, "--cancel-after", "1.5")
+        phone = self.start_phone(url=url, cancel_after=1.0)
         self.start()
         self.wait_active()
         wait_until(lambda: self.engine.active is None, 15, "the phone's cancel")
@@ -219,22 +266,22 @@ class LoginTests(EngineCase):
         self.assertTrue(self.host.claims[0].released)
         self.ui(lambda: self.engine.receive("%s?code=LATE&state=STATE-2" % redirect))
         time.sleep(0.5)
-        self.assertEqual(self.world.lines("am_calls.jsonl"), [])
-        self.assertEqual(self.world.phone_messages("done"), [])   # the phone cancelled, nobody to tell
+        self.assertEqual(phone.messages("callback"), [])
+        self.assertEqual(phone.messages("done"), [])   # the phone cancelled, nobody to tell
 
     def test_cancel_from_the_computer_closes_the_phones_screen(self):
         url, _ = authorize_url("STATE-3")
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         self.wait_active()
         self.ui(lambda: self.engine.cancel_active("Cancelled on the computer.", notify_phone=True))
         self.assertTrue(self.host.claims[0].released)
-        wait_until(lambda: self.world.phone_messages("done"), 5, "done")
+        wait_until(lambda: phone.messages("done"), 5, "done")
         self.assertIn("Cancelled on the computer.", self.logs())
 
     def test_a_newer_request_replaces_the_one_in_progress(self):
         url, _ = authorize_url("STATE-4")
-        self.world.start_phone("--url", url)
+        self.start_phone(url=url)
         self.start()
         first = self.wait_active()
         request = RelayRequest(authorize_url("STATE-5")[0], "android-app://" + PACKAGE, None)
@@ -246,49 +293,48 @@ class LoginTests(EngineCase):
 
     def test_phone_vanishing_ends_the_login(self):
         url, _ = authorize_url("STATE-6")
-        self.world.start_phone("--url", url)
-        self.start()
+        phone = self.start_phone(url=url)
+        self.start(usb_error_pause=60)
         self.wait_active()
-        self.world.write("devices.txt", "")      # unplugged
+        phone.stop()                               # unplugged for good
         wait_until(lambda: self.engine.active is None, 15, "the login to end")
         self.assertTrue(self.host.claims[0].released)
-        self.wait_phase(eng.NO_PHONE)
         self.assertIn("Link to the phone closed.", self.logs())
+        wait_until(lambda: not self.engine.linked, 5, "the link to be gone")
 
     def test_login_times_out(self):
-        self.engine._login_timeout = 1.0
         url, _ = authorize_url("STATE-7")
-        self.world.start_phone("--url", url)
-        self.start()
+        phone = self.start_phone(url=url)
+        self.start(login_timeout=1.0)
         self.wait_active()
         wait_until(lambda: self.engine.active is None, 10, "the timeout")
         self.assertIn("Timed out waiting for the browser.", self.logs())
-        wait_until(lambda: self.world.phone_messages("error"), 5, "the error message")
-        self.assertEqual(self.world.phone_messages("error")[0]["text"], "Timed out waiting for the browser.")
+        wait_until(lambda: phone.messages("error"), 5, "the error message")
+        self.assertEqual(phone.messages("error")[0]["text"], "Timed out waiting for the browser.")
         self.assertTrue(self.host.claims[0].released)
 
     def test_plain_link_opens_in_the_browser(self):
-        self.world.start_phone("--url", "https://example.com/terms")
+        phone = self.start_phone(url="https://example.com/terms")
         self.start()
         wait_until(lambda: self.host.opened, 15, "the link to open")
         self.assertEqual(self.host.opened, ["https://example.com/terms"])
-        wait_until(lambda: self.world.phone_messages("done"), 10, "done")
-        self.assertEqual(self.world.phone_messages("status")[0]["text"], "Opened on your computer.")
+        wait_until(lambda: phone.messages("done"), 10, "done")
+        self.assertEqual(phone.messages("status")[0]["text"], "Opened on your computer.")
         self.assertIsNone(self.engine.active)
 
     def test_plain_link_with_a_strange_scheme_is_not_opened(self):
-        self.world.start_phone("--url", "file:///etc/passwd")
+        phone = self.start_phone(url="file:///etc/passwd")
         self.start()
-        wait_until(lambda: self.world.phone_messages("status"), 15, "the status")
+        wait_until(lambda: phone.messages("status"), 15, "the status")
         self.assertEqual(self.host.opened, [])
 
     def test_sign_in_without_pkce_is_declined(self):
         url, _ = authorize_url("S", pkce=False)
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         wait_until(lambda: self.host.pkce_asked, 15, "the PKCE question")
-        wait_until(lambda: self.world.phone_messages("error"), 5, "the error message")
-        self.assertEqual(self.world.phone_messages("error")[0]["text"], "Cancelled on the computer.")
+        wait_until(lambda: phone.messages("error"), 5, "the error message")
+        self.assertEqual(phone.messages("error")[0]["text"], "Cancelled on the computer.")
         self.assertIn("Declined: the sign-in doesn't use PKCE.", self.logs())
         self.assertIsNone(self.engine.active)
         self.assertEqual(self.host.claims, [])
@@ -296,7 +342,7 @@ class LoginTests(EngineCase):
     def test_sign_in_without_pkce_can_continue(self):
         self.host.pkce_answer = True
         url, _ = authorize_url("S", pkce=False)
-        self.world.start_phone("--url", url)
+        self.start_phone(url=url)
         self.start()
         self.wait_active()
         self.assertEqual(len(self.host.pkce_asked), 1)
@@ -304,7 +350,7 @@ class LoginTests(EngineCase):
     def test_refused_claim_falls_back_to_pasting(self):
         self.host.refuse_claims = True
         url, redirect = authorize_url("STATE-8")
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         flow = self.wait_active()
         wait_until(lambda: self.host.pasted_asked, 10, "the paste prompt")
@@ -321,250 +367,233 @@ class LoginTests(EngineCase):
         self.assertIs(self.engine.active, flow)
         good = "  %s?code=G&state=STATE-8\n" % redirect
         self.assertEqual(self.ui(lambda: self.engine.submit_pasted(flow, good)), "ok")
-        wait_until(lambda: self.world.lines("am_calls.jsonl"), 10, "am start")
-        self.assertEqual(self.world.lines("am_calls.jsonl")[0]["-d"], good.strip())
+        wait_until(lambda: phone.messages("callback"), 10, "the callback")
+        self.assertEqual(phone.messages("callback")[0]["url"], good.strip())
         self.assertEqual(self.host.pasted_closed, [flow])
 
     def test_cancelling_the_paste_prompt_cancels_the_login(self):
         self.host.refuse_claims = True
         url, _ = authorize_url("STATE-9")
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         flow = self.wait_active()
         wait_until(lambda: self.host.pasted_asked, 10, "the paste prompt")
         self.ui(lambda: self.engine.cancel_pasted(flow))
         self.assertIsNone(self.engine.active)
-        wait_until(lambda: self.world.phone_messages("done"), 5, "done")
+        wait_until(lambda: phone.messages("done"), 5, "done")
         self.assertEqual(self.host.pasted_closed, [])   # the prompt closed itself
 
     def test_https_return_address_asks_for_the_pasted_address(self):
         url = ("https://login.example.com/authorize?response_type=code&code_challenge=x&state=Q"
                "&redirect_uri=https%3A%2F%2Fapp.example%2Fcb")
-        self.world.start_phone("--url", url)
+        self.start_phone(url=url)
         self.start()
         self.wait_active()
         wait_until(lambda: self.host.pasted_asked, 10, "the paste prompt")
         self.assertEqual(self.host.claims, [])
 
 
-class PhaseTests(EngineCase):
-    def test_no_phone(self):
-        self.world.write("devices.txt", "")
-        self.world.start_phone()
-        self.start()
-        self.wait_phase(eng.NO_PHONE)
-        self.assertEqual(eng.describe(self.engine)[0], "No phone connected")
-        self.assertEqual(eng.describe(self.engine)[1],
-                         "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).")
+class FakePhoneHookTests(EngineCase):
+    """LOGINRELAY_FAKE_PHONE=host:port: one USB phone called "Fake Phone", reached over TCP, no pyusb."""
 
-    def test_unauthorized_and_offline(self):
-        self.world.write("devices.txt", "ABC\tunauthorized usb:1 model:Pixel_7 transport_id:1")
-        self.start()
-        self.wait_phase(eng.UNAUTHORIZED)
-        self.assertEqual(eng.describe(self.engine),
-                         ("Pixel 7 is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt."))
-        self.world.write("devices.txt", "ABC\toffline model:Pixel_7")
-        wait_until(lambda: eng.describe(self.engine)[0] == "Pixel 7 isn't responding (offline)", 10, "offline text")
-        self.assertEqual(eng.describe(self.engine)[1],
-                         "Unplug the cable and plug it back in, then choose Check Again.")
-        self.assertEqual([e.label for e in eng.menu_model(self.engine) if e.kind == "action"],
-                         ["Check Again", "Show Activity…", "About Login Relay", "Quit Login Relay"])
-
-    def test_app_missing_then_install_it(self):
-        apk = os.path.join(self.tmp, "login-relay.apk")
-        with open(apk, "wb") as f:
-            f.write(b"apk")
-        self.engine._bundled_apk = apk
-        self.engine.bundled_phone_version = "0.3.0"
-        self.world.write("no_app")
-        self.world.start_phone()
-        self.start()
-        self.wait_phase(eng.NEEDS_APP)
-        self.assertEqual(eng.describe(self.engine),
-                         ("Login Relay isn't on Fake Phone", "Install it on the phone to start."))
-        self.assertEqual(eng.window_actions(self.engine), (("Install on Phone", eng.A_INSTALL), None, True))
-        labels = [e.label for e in eng.menu_model(self.engine) if e.kind == "action"]
-        self.assertEqual(labels[0], "Install Login Relay on Phone")
-
-        self.ui(self.engine.install_phone_app)
-        self.assertEqual(eng.describe(self.engine)[0], "Installing Login Relay on Fake Phone…")
-        wait_until(lambda: self.world.lines("installs.jsonl"), 10, "the install")
-        self.assertEqual(self.world.lines("installs.jsonl")[0], {"apk": apk, "exists": True})
-        wait_until(lambda: "Installed." in self.logs(), 10, "install done")
-        os.unlink(self.world.p("no_app"))          # the "install" makes the app appear
-        self.wait_phase(eng.READY)
-        self.assertEqual(self.engine.phone_version, "0.3.0")
-        self.assertIsNone(self.engine.busy)
-
-    def test_app_missing_without_a_bundled_apk(self):
-        self.world.write("no_app")
-        self.start()
-        self.wait_phase(eng.NEEDS_APP)
-        self.assertEqual(eng.describe(self.engine)[1], "Install login-relay.apk on the phone.")
-        self.assertEqual(eng.window_actions(self.engine)[0], None)
-        self.ui(self.engine.install_phone_app)       # nothing to install: no-op
-        self.assertIsNone(self.engine.busy)
-
-    def test_outdated_phone_app_offers_an_update(self):
-        apk = os.path.join(self.tmp, "login-relay.apk")
-        open(apk, "wb").close()
-        self.engine._bundled_apk = apk
-        self.engine.bundled_phone_version = "0.3.0"
-        self.world.write("phone_version", "0.2.2")
-        self.world.start_phone()
+    def test_the_hook_makes_exactly_one_ready_phone(self):
+        phone = self.start_phone()
         self.start()
         self.wait_phase(eng.READY)
-        self.assertTrue(self.engine.phone_app_is_outdated)
-        self.assertEqual(eng.window_actions(self.engine),
-                         (("Open on Phone", eng.A_OPEN), ("Update on Phone", eng.A_INSTALL), True))
+        self.assertEqual(self.engine.device.title, "Fake Phone")
+        self.assertEqual(self.engine.device.serial, "usb:fake")
         self.assertEqual(eng.describe(self.engine),
-                         ("Fake Phone is ready",
-                          "Sign in to an app on the phone and the page opens here. An update for the phone app is available."))
-        menu = eng.menu_model(self.engine, launch_at_login=True)
-        self.assertEqual([e.label for e in menu],
-                         ["Fake Phone is ready", "", "Open Login Relay on Phone",
-                          "Update Login Relay on Phone (0.2.2 → 0.3.0)", "", "Connect Over", "Show Activity…", "",
-                          "Launch at Login", "Notify When a Sign-in Arrives", "", "About Login Relay",
-                          "Quit Login Relay"])
-        self.assertTrue(menu[0].good)
-        self.assertTrue([e for e in menu if e.label == "Launch at Login"][0].checked)
+                         ("Fake Phone is ready", "Sign in to an app on the phone and the page opens here."))
+        self.assertEqual(self.engine.phone_version, "0.5.0")
+        self.assertIn("Login Relay 0.5.0 on the phone says hello (usb).", self.logs())
+        self.assertIn("USB phone: Fake Phone", self.logs())
+        self.assertEqual(self.engine.usb_candidates, [])      # never offers a choice
+        self.assertEqual(eng.usb_phone_choices(self.engine), ())
+        self.assertEqual(phone.connections, 1)
 
-    def test_open_on_phone(self):
-        self.world.start_phone()
+    def test_pyusb_is_never_touched(self):
+        patcher = mock.patch.dict(sys.modules, {"usb": None, "usb.core": None, "usb.util": None})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.start_phone()
         self.start()
         self.wait_phase(eng.READY)
-        self.ui(self.engine.open_on_phone)
-        wait_until(lambda: any("RelayActivity" in c["command"] for c in self.world.lines("shell_calls.jsonl")),
-                   10, "the shell command")
-        cmd = [c["command"] for c in self.world.lines("shell_calls.jsonl") if "RelayActivity" in c["command"]][0]
-        self.assertEqual(cmd, "input keyevent KEYCODE_WAKEUP; am start -n io.github.clippycoder.oauthrelay/.RelayActivity")
+        self.assertEqual(self.adb_stops, [])
 
-    def test_no_adb(self):
-        os.environ["LOGINRELAY_ADB"] = ""
-        self.engine._locate = lambda choice: None
-        self.start()
-        self.wait_phase(eng.NO_ADB)
-        self.assertEqual([e.label for e in eng.menu_model(self.engine) if e.kind == "action"][:2],
-                         ["Download Android Platform-Tools…", "Choose adb…"])
-        self.assertEqual(eng.window_actions(self.engine)[:2],
-                         (("Download Platform-Tools…", eng.A_DOWNLOAD), ("Choose adb…", eng.A_CHOOSE_ADB)))
+    def test_default_liveness_is_a_ping_every_two_seconds(self):
+        phone = self.start_phone()
+        self.start(usb_link_args={})
+        self.wait_phase(eng.READY, 6)
+        wait_until(lambda: len(phone.messages("ping")) >= 2, 8, "two pings")
+        times = [t for t, m in phone.received if m.get("type") == "ping"]
+        self.assertGreater(times[1] - times[0], 1.7)
+        self.assertLess(times[1] - times[0], 3.0)
+        self.assertTrue(self.engine.usb_alive)
 
-    def test_two_phones_get_a_submenu_and_the_choice_sticks(self):
-        self.world.write("devices.txt", "AAA\tdevice model:One\nBBB\tdevice model:Two")
+    def test_a_phone_that_stops_answering_goes_idle_but_stays_connected(self):
+        phone = self.start_phone()
         self.start()
         self.wait_phase(eng.READY)
-        self.assertEqual(self.engine.device.serial, "AAA")
-        sub = [e for e in eng.menu_model(self.engine) if e.kind == "submenu"][0]
-        self.assertEqual([(c.label, c.arg, c.checked) for c in sub.children],
-                         [("One (AAA)", "AAA", True), ("Two (BBB)", "BBB", False)])
-        self.ui(lambda: self.engine.select_device("BBB"))
-        wait_until(lambda: self.engine.device and self.engine.device.serial == "BBB", 10, "the new choice")
-        self.assertEqual(Prefs(self.prefs.path).selected_serial, "BBB")
+        phone.answer_ping = False
+        self.wait_log("Login Relay on the phone went idle (it starts again by itself when an app asks to sign in).", 8)
+        self.assertTrue(self.engine.linked)
+        self.assertEqual(self.engine.phase.kind, eng.READY)
+        phone.answer_ping = True
+        wait_until(lambda: self.engine.usb_alive, 5, "alive again")
 
-    def test_choose_adb_is_remembered(self):
-        self.ui(lambda: self.engine.choose_adb("/opt/adb"))
-        self.assertEqual(self.prefs.adb_path, "/opt/adb")
-
-    def test_working_menu(self):
-        url, _ = authorize_url("STATE-M")
-        self.world.start_phone("--url", url, "--label", "Example App")
+    def test_no_hello_means_connecting_until_it_answers(self):
+        phone = self.start_phone(hello=False, answer_ping=False)
         self.start()
-        self.wait_active()
-        self.assertEqual(eng.describe(self.engine),
-                         ("Example App sign-in in progress",
-                          "Finish in your browser. If it asks to open Login Relay, allow it."))
-        self.assertEqual([e.label for e in eng.menu_model(self.engine) if e.kind == "action"][0], "Cancel sign-in")
-        self.assertEqual(eng.window_actions(self.engine)[0], ("Cancel", eng.A_CANCEL))
+        wait_until(lambda: self.engine.linked, 10, "the link")
+        self.assertEqual(self.engine.phase.kind, eng.CONNECTING)
+        self.assertEqual(eng.describe(self.engine)[0], "Fake Phone is connected over USB")
+        phone.answer_ping = True
+        self.wait_phase(eng.READY)
+
+    def test_nothing_listening_is_reported_not_fatal(self):
+        phone = self.start_phone()
+        phone.stop()
+        self.start()
+        wait_until(lambda: self.engine.usb_detail == "Couldn't open the accessory connection (error -2).",
+                   10, "the failure text")
+        self.assertEqual(self.engine.phase.kind, eng.CONNECTING)
+        self.assertEqual(eng.describe(self.engine)[0], "Connecting to Fake Phone\u2026")
+
+    def test_a_malformed_value_is_reported(self):
+        os.environ["LOGINRELAY_FAKE_PHONE"] = "not-an-address"
+        self.start()
+        wait_until(lambda: self.engine.usb_detail, 5, "the detail")
+        self.assertEqual(self.engine.usb_detail, "LOGINRELAY_FAKE_PHONE must look like host:port")
+        self.assertEqual(self.engine.phase.kind, eng.NO_PHONE)
+
+    def test_address_parsing(self):
+        self.assertEqual(fakephone.parse_address("127.0.0.1:4000"), ("127.0.0.1", 4000))
+        self.assertEqual(fakephone.parse_address("[::1]:80"), ("::1", 80))
+        for bad in ("", "x", "x:", ":80", "x:y", "x:0", "x:70000"):
+            with self.assertRaises(ValueError, msg=bad):
+                fakephone.parse_address(bad)
+
+    def test_messages_are_plain_lines_with_no_padding(self):
+        phone = self.start_phone()
+        self.start()
+        self.wait_phase(eng.READY)
+        # A message whose JSON plus newline is exactly 64 bytes: over real USB it would get a second
+        # newline; over TCP it must not.
+        prefix = '{"type":"status","text":"'
+        text = "x" * (63 - len(prefix) - len('"}'))
+        link = self.engine._current_link
+        link.send({"type": "status", "text": text})
+        wait_until(lambda: phone.messages("status"), 5, "the status")
+        self.assertEqual(len(prefix) + len(text) + len('"}') + 1, 64)
+        self.assertNotIn(b"\n\n", bytes(phone.raw))
+        self.assertTrue(all(line for line in bytes(phone.raw).split(b"\n")[:-1]))
+
+    def test_the_link_frames_usb_pipes_but_not_tcp_ones(self):
+        class Pipe:
+            def __init__(self, needs_padding=None):
+                if needs_padding is not None:
+                    self.needs_padding = needs_padding
+                self.written = b""
+
+            def write(self, data, timeout_ms):
+                self.written += data
+                return len(data)
+
+        text = "x" * (63 - len('{"type":"status","text":"') - len('"}'))
+        for pipe, expected in ((Pipe(), b"\n\n"), (Pipe(True), b"\n\n"), (Pipe(False), b"\n")):
+            UsbPhoneLink(pipe).send({"type": "status", "text": text})
+            self.assertTrue(pipe.written.endswith(expected) and not pipe.written.endswith(b"\n\n\n"))
+            self.assertEqual(len(pipe.written), 64 + len(expected) - 1)
+
+    def test_a_phone_that_hangs_up_straight_away_never_becomes_ready(self):
+        self.start_phone(idle=True)
+        self.start()
+        self.wait_log("Link to the phone closed.")
+        time.sleep(0.5)
+        self.assertNotEqual(self.engine.phase.kind, eng.READY)    # it never said hello or answered a ping
+        self.assertFalse(self.engine.usb_ever_alive)
+
+    def test_reconnects_after_the_connection_drops(self):
+        phone = self.start_phone()
+        self.start()
+        self.wait_phase(eng.READY)
+        phone.hang_up()
+        self.wait_log("Link to the phone closed.")
+        wait_until(lambda: phone.connections >= 2 and self.engine.linked, 15, "the second connection")
+        self.wait_phase(eng.READY)
 
 
 class RobustnessTests(EngineCase):
-    engine_args = dict(check_interval=0.2, link_recheck=0.4)
-
     def test_polling_does_not_leak_file_descriptors(self):
-        self.world.start_phone()           # idle phone: linked, nothing to do
-        self.start()
+        phone = self.start_phone()
+        self.start(usb_recheck=0.1, usb_link_args=dict(ping_interval=0.1, silence=1.0))
         self.wait_phase(eng.READY)
         wait_until(lambda: self.engine.linked, 10, "the link")
         time.sleep(1.5)                    # warm-up
         before = stable_fds()
-        calls_before = len(self.world.lines("adb_calls.jsonl"))
-        time.sleep(7)
-        calls = len(self.world.lines("adb_calls.jsonl")) - calls_before
-        self.assertGreater(calls, 5, "the loop should have been polling")
+        pings = len(phone.messages("ping"))
+        time.sleep(5)
+        self.assertGreater(len(phone.messages("ping")) - pings, 20, "the link should have been pinging")
         self.assertTrue(self.engine.linked)
         assert_fds_flat(self, before)
 
-    def test_polling_without_a_phone_does_not_leak_either(self):
-        self.world.write("devices.txt", "")
-        self.start()
-        self.wait_phase(eng.NO_PHONE)
-        time.sleep(1.0)
-        before = stable_fds()
-        time.sleep(4)
-        assert_fds_flat(self, before)
-
-    def test_losing_the_phone_while_linked_is_noticed_within_the_recheck(self):
-        self.world.start_phone()
-        self.start()
-        wait_until(lambda: self.engine.linked, 15, "the link")
-        self.world.write("devices.txt", "")
-        t0 = time.time()
-        wait_until(lambda: not self.engine.linked, 8, "the link to be dropped")
-        self.assertLess(time.time() - t0, 4)
-        self.wait_phase(eng.NO_PHONE)
-
-    def test_phone_that_hangs_up_straight_away_is_not_linked(self):
-        self.world.start_phone("--idle")
+    def test_reconnecting_repeatedly_does_not_leak_either(self):
+        phone = self.start_phone()
         self.start()
         self.wait_phase(eng.READY)
-        time.sleep(2)
-        self.assertFalse(self.engine.linked)
+        time.sleep(1.0)
+        before = stable_fds()
+        for i in range(4):
+            seen = phone.connections
+            phone.hang_up()
+            wait_until(lambda: phone.connections > seen and self.engine.linked, 15, "a reconnection")
+        assert_fds_flat(self, before)
 
     def test_check_again_wakes_the_loop(self):
-        self.engine._check_interval = 60
-        self.world.write("devices.txt", "")
-        self.start()
-        self.wait_phase(eng.NO_PHONE)
-        os.unlink(self.world.p("devices.txt"))
-        self.world.start_phone()
+        phone = self.start_phone()
+        phone.stop()
+        self.start(usb_error_pause=60)
+        wait_until(lambda: self.engine.usb_detail, 10, "the failure text")
         self.ui(self.engine.check_again)
-        self.wait_phase(eng.READY, 5)
-        self.assertIn("Checking for the phone…", self.logs())
+        self.wait_log("Checking for the phone\u2026")
 
 
 class WatchdogTests(EngineCase):
-    engine_args = dict(check_interval=0.3, watchdog_interval=0.3, watchdog_after=1.0)
-
     def test_stuck_loop_is_replaced(self):
-        # The first adb call hangs; the watchdog should start a fresh loop that works.
-        marker = os.path.join(self.tmp, "hung-once")
-        wrapper = os.path.join(self.tmp, "slow-adb")
-        with open(wrapper, "w") as f:
-            f.write('#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exec sleep 6; fi\nexec "%s" "$@"\n'
-                    % (marker, marker, self.world.adb))
-        os.chmod(wrapper, 0o755)
-        os.environ["LOGINRELAY_ADB"] = wrapper
-        self.world.start_phone()
-        self.start()
+        # The first open hangs; the watchdog should start a fresh loop that works.
+        self.start_phone()
+        real_open = fakephone.TcpPhoneBackend.open
+        hung = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def slow_open(backend, location):
+            if not hung.is_set():
+                hung.set()
+                release.wait(8)
+            return real_open(backend, location)
+
+        patcher = mock.patch.object(fakephone.TcpPhoneBackend, "open", slow_open)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.start(watchdog_interval=0.3, watchdog_after=1.0)
         wait_until(lambda: "Checking for the phone got stuck; starting over." in self.logs(), 10, "the watchdog")
         self.wait_phase(eng.READY, 10)
         self.assertEqual(self.engine._generation, 2)
 
 
 class ShutdownTests(EngineCase):
-    def test_shutdown_cancels_the_login_releases_the_claim_and_removes_the_forward(self):
+    def test_shutdown_cancels_the_login_releases_the_claim_and_hangs_up(self):
         url, _ = authorize_url("STATE-S")
-        self.world.start_phone("--url", url)
+        phone = self.start_phone(url=url)
         self.start()
         self.wait_active()
         self.ui(self.engine.shutdown)
         self.assertTrue(self.host.claims[0].released)
         self.assertIn("Quit", self.logs())
-        wait_until(lambda: self.world.phone_messages("done"), 5, "done")
-        with open(self.world.p("phone_port")) as f:
-            port = f.read().strip()
-        calls = [c["argv"] for c in self.world.lines("adb_calls.jsonl")]
-        self.assertIn(["-s", "FAKE0001", "forward", "--remove", "tcp:" + port], calls)
+        wait_until(lambda: phone.messages("done"), 5, "done")
+        wait_until(lambda: not self.engine.linked or self.engine._current_link is None
+                   or self.engine._current_link.closed, 5, "the link to close")
 
 
 if __name__ == "__main__":

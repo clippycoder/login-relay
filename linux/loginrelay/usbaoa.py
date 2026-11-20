@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Android Open Accessory (AOA) host side, on pyusb. No kernel module, no adb.
+"""Android Open Accessory (AOA) host side, on pyusb. No kernel module, no USB debugging.
 
 An Android phone can be switched into "accessory mode" over USB without USB debugging: the computer
 sends a few vendor control requests, the phone reappears as Google 18D1:2D00..2D05 with one bulk IN
@@ -68,7 +68,7 @@ class UsbDevice:
     product_id: int
     location: str               # bus + port path ("1-4.2"); stays the same across the mode switch
     is_accessory: bool          # already in accessory mode (18D1:2D00..2D05)
-    looks_android: bool         # exposes an MTP/PTP/ADB-style interface, so worth asking about AOA
+    looks_android: bool         # exposes an MTP/PTP (or ADB-class) interface, so worth asking about AOA
     name: str = ""
     serial: str = ""
 
@@ -125,11 +125,12 @@ def is_accessory_ids(vendor_id: int, product_id: int) -> bool:
 
 
 def looks_like_phone(interfaces: Iterable[Tuple[int, int, int]]) -> bool:
-    """Does this device expose an interface that Android phones use for MTP/PTP or ADB?
+    """Does this device expose an interface that Android phones use for MTP/PTP, or the interface class
+    that marks an Android debugging interface? (Only used to recognise a phone; nothing here uses adb.)
     `interfaces` are (class, subclass, protocol) triples."""
     for cls, sub, proto in interfaces:
         if (cls == 0x06 and sub == 0x01                  # still image / PTP / MTP
-                or cls == 0xFF and sub == 0x42 and proto == 0x01   # ADB
+                or cls == 0xFF and sub == 0x42 and proto == 0x01   # ADB interface class: recognises a phone only
                 or cls == 0xFF and sub == 0xFF and proto == 0x00):  # vendor-specific MTP
             return True
     return False
@@ -163,7 +164,7 @@ def error_text(code: int, name: str, detail: str = "") -> str:
     if code == AOA_ERR_UNSUPPORTED:
         return "%s doesn't answer the USB accessory protocol." % name
     if code == AOA_ERR_BUSY:
-        return "Another program has %s open (usually adb)." % name
+        return "Another program has %s open." % name
     if code == AOA_ERR_OPEN:
         return "Couldn't open %s over USB." % name
     if code == AOA_ERR_NOT_FOUND:
@@ -423,7 +424,7 @@ class PyUsbBackend(UsbBackend):
             except usb.core.USBError:
                 dev.set_configuration()
                 cfg = dev.get_active_configuration()
-            # The accessory is interface 0 (with 18D1:2D01 there is a second one for adb: leave it alone).
+            # The accessory is interface 0 (with 18D1:2D01 there is a second, unrelated interface: leave it alone).
             intf = usb.util.find_descriptor(cfg, bInterfaceNumber=0)
             if intf is None:
                 raise UsbError(AOA_ERR_ENDPOINTS, "no accessory interface")

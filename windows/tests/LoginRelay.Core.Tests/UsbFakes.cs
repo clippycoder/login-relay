@@ -202,6 +202,9 @@ namespace LoginRelay.Core.Tests
         /// <summary>Do new connections answer pings?</summary>
         public bool RespondToPings = true;
 
+        /// <summary>If not zero, opening the accessory fails with this UsbCode.</summary>
+        public int OpenFailCode = 0;
+
         public static UsbDevice Phone(string location, string name = "Fake Phone", ushort vid = 0x04E8, ushort pid = 0x6860)
         {
             return new UsbDevice(vid, pid, location, false, true, name, "SER" + location);
@@ -312,45 +315,14 @@ namespace LoginRelay.Core.Tests
                 {
                     throw new UsbException(UsbCode.NoDriver, "not bound to WinUSB");
                 }
+                if (OpenFailCode != 0)
+                {
+                    throw new UsbException(OpenFailCode, "fake open failure");
+                }
                 _openCount++;
                 var connection = new FakeUsbConnection(this, location, RespondToPings);
                 _connections.Add(connection);
                 return connection;
-            }
-        }
-    }
-
-    internal sealed class FakeDiagnostics : IUsbDiagnostics
-    {
-        private readonly object _lock = new object();
-        private List<PnpDevice> _devices = new List<PnpDevice>();
-        private int _calls;
-
-        public bool Throw;
-
-        public int Calls
-        {
-            get { lock (_lock) { return _calls; } }
-        }
-
-        public void Set(params PnpDevice[] devices)
-        {
-            lock (_lock)
-            {
-                _devices = devices.ToList();
-            }
-        }
-
-        public IReadOnlyList<PnpDevice> QueryUsbDevices()
-        {
-            lock (_lock)
-            {
-                _calls++;
-                if (Throw)
-                {
-                    throw new InvalidOperationException("WMI is broken");
-                }
-                return _devices.ToList();
             }
         }
     }

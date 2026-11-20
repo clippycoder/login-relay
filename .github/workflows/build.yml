@@ -36,8 +36,7 @@ jobs:
           mkdir -p android/build
           cp "$LOGINRELAY_APK" android/build/login-relay.apk
           macos/build.sh
-      - name: End-to-end test (fake phone, fake adb)
-        continue-on-error: true
+      - name: End-to-end test (fake phone over a socket)
         run: python3 tests/e2e/run_e2e.py -- "$PWD/macos/build/Login Relay.app/Contents/MacOS/LoginRelay" --verbose
       - name: Check the package contains the phone app
         run: unzip -l macos/build/Login-Relay-macOS-*.zip | grep -q "Resources/login-relay.apk"
@@ -70,9 +69,8 @@ jobs:
       - name: Check the package contains the phone app
         shell: bash
         run: |
-          python -c "import glob,zipfile; n=zipfile.ZipFile(glob.glob('windows/publish/Login-Relay-Windows-*.zip')[0]).namelist(); print(n); assert 'login-relay.apk' in n and 'phone-app-version.txt' in n"
-      - name: End-to-end test (fake phone, fake adb)
-        continue-on-error: true
+          python -c "import glob,zipfile; n=zipfile.ZipFile(glob.glob('windows/publish/Login-Relay-Windows-*.zip')[0]).namelist(); print(n); assert 'login-relay.apk' in n"
+      - name: End-to-end test (fake phone over a socket)
         shell: bash
         run: python tests/e2e/run_e2e.py -- windows/publish/LoginRelay.exe
         env:
@@ -125,8 +123,7 @@ jobs:
         run: |
           dpkg-deb -c linux/dist/*.deb | grep -q "share/loginrelay/login-relay.apk"
           tar -tzf linux/dist/*.tar.gz | grep -q "data/login-relay.apk"
-      - name: End-to-end test (fake phone, fake adb) under a virtual display
-        continue-on-error: true
+      - name: End-to-end test (fake phone over a socket) under a virtual display
         working-directory: linux
         run: xvfb-run -a dbus-run-session -- python3 ../tests/e2e/run_e2e.py -- python3 -m loginrelay
         env:

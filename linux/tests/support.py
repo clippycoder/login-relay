@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Shared test plumbing: the real tests/e2e fake adb and fake phone, run as subprocesses."""
+"""Shared test plumbing: helpers, and a fake phone that listens on a TCP port (the LOGINRELAY_FAKE_PHONE hook)."""
 import gc
 import json
 import os
-import shutil
-import subprocess
+import socket
 import sys
-import tempfile
+import threading
 import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-E2E = os.path.join(HERE, "..", "..", "tests", "e2e")
 SCHEME = "com.example.relaytest"
 PACKAGE = "com.example.app"
 
@@ -63,57 +61,130 @@ def authorize_url(state, kind="signin", pkce=True, response_type="code"):
     return "https://login.example.com/authorize?" + urllib.parse.urlencode(q), redirect
 
 
-class FakeWorld:
-    """A state directory, a fake adb wrapper script and (optionally) a fake phone process."""
+class FakePhoneServer:
+    """The Login Relay app on a phone, listening on 127.0.0.1. Point LOGINRELAY_FAKE_PHONE at `address`.
 
-    def __init__(self):
-        self.state = tempfile.mkdtemp(prefix="lr-test-")
-        bindir = os.path.join(self.state, "bin")
-        os.makedirs(bindir)
-        self.adb = os.path.join(bindir, "adb")
-        with open(self.adb, "w") as f:
-            f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, os.path.join(E2E, "fake_adb.py")))
-        os.chmod(self.adb, 0o755)
-        self.phone = None
-        self._saved = {}
-        for key, value in (("LOGINRELAY_ADB", self.adb), ("FAKE_ADB_STATE", self.state),
-                           ("LOGINRELAY_BROWSER", "none")):
-            self._saved[key] = os.environ.get(key)
-            os.environ[key] = value
+    Plain newline-delimited JSON, no padding. On every connection it says hello, then (if `url` is
+    set and hasn't been finished) sends an `open` for it, answers pings with pongs, and answers a
+    `callback` with `delivered` (or an `error`). Everything it receives is kept in `received`."""
 
-    def p(self, name):
-        return os.path.join(self.state, name)
+    def __init__(self, url=None, referrer="android-app://" + PACKAGE, label="Example App", version="0.5.0",
+                 hello=True, idle=False, answer_ping=True, delivery_reply="delivered", cancel_after=None):
+        self.pending = url
+        self.referrer, self.label, self.version = referrer, label, version
+        self.hello, self.idle, self.answer_ping = hello, idle, answer_ping
+        self.delivery_reply = delivery_reply     # "delivered", "error:<text>" or None (stay silent)
+        self.cancel_after = cancel_after
+        self.received = []                       # (monotonic time, message)
+        self.raw = bytearray()                   # every byte the app sent
+        self.connections = 0
+        self._conns = []
+        self._lock = threading.Lock()
+        self._srv = socket.socket()
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen(8)
+        self.port = self._srv.getsockname()[1]
+        self._stopped = False
+        threading.Thread(target=self._accept_loop, name="fake-phone", daemon=True).start()
 
-    def write(self, name, text=""):
-        with open(self.p(name), "w", encoding="utf-8") as f:
-            f.write(text)
+    @property
+    def address(self):
+        return "127.0.0.1:%d" % self.port
 
-    def start_phone(self, *args):
-        self.phone = subprocess.Popen([sys.executable, os.path.join(E2E, "fake_phone.py"), "--state", self.state,
-                                       "--referrer", "android-app://" + PACKAGE, *args])
-        wait_until(lambda: os.path.exists(self.p("phone_port")), 10, "the fake phone to listen")
-
-    def lines(self, name):
-        try:
-            with open(self.p(name), encoding="utf-8") as f:
-                return [json.loads(l) for l in f if l.strip()]
-        except OSError:
-            return []
-
-    def phone_messages(self, kind=None):
-        return [m for m in self.lines("phone_msgs.jsonl") if kind is None or m.get("type") == kind]
-
-    def close(self):
-        if self.phone is not None and self.phone.poll() is None:
-            self.phone.terminate()
+    def _accept_loop(self):
+        while not self._stopped:
             try:
-                self.phone.wait(5)
-            except subprocess.TimeoutExpired:
-                self.phone.kill()
-                self.phone.wait()
-        for key, value in self._saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        shutil.rmtree(self.state, ignore_errors=True)
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            with self._lock:
+                self._conns.append(conn)
+                self.connections += 1
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def send(self, obj, conn=None):
+        data = (json.dumps(obj, separators=(",", ":")) + "\n").encode()
+        with self._lock:
+            targets = [conn] if conn is not None else list(self._conns)
+        for c in targets:
+            try:
+                c.sendall(data)
+            except OSError:
+                pass
+
+    def _serve(self, conn):
+        if self.idle:
+            conn.close()
+            return
+        if self.hello:
+            self.send({"v": 1, "type": "hello", "transport": "usb", "version": self.version}, conn)
+        if self.pending:
+            self.send({"v": 1, "type": "open", "url": self.pending, "referrer": self.referrer,
+                       "label": self.label}, conn)
+            if self.cancel_after is not None:
+                threading.Timer(self.cancel_after, lambda: self.send({"type": "cancel"}, conn)).start()
+        buf = b""
+        try:
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                self.raw += chunk
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    self.received.append((time.monotonic(), msg))
+                    self._react(msg, conn)
+        except OSError:
+            return
+        finally:
+            with self._lock:
+                if conn in self._conns:
+                    self._conns.remove(conn)
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _react(self, msg, conn):
+        kind = msg.get("type")
+        if kind == "ping" and self.answer_ping:
+            self.send({"type": "pong"}, conn)
+        elif kind == "callback":
+            self.pending = None
+            if self.delivery_reply == "delivered":
+                self.send({"type": "delivered"}, conn)
+            elif self.delivery_reply:
+                self.send({"type": "error", "text": self.delivery_reply.split(":", 1)[1]}, conn)
+        elif kind == "done":
+            self.pending = None
+
+    def messages(self, kind=None):
+        return [m for _, m in list(self.received) if kind is None or m.get("type") == kind]
+
+    def hang_up(self):
+        """Close every connection (the cable came out); the phone can still be reached again."""
+        with self._lock:
+            conns, self._conns = self._conns, []
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            c.close()
+
+    def stop(self):
+        """Hang up and stop listening, for good."""
+        self._stopped = True
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+        self.hang_up()

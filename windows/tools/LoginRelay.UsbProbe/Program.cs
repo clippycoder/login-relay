@@ -2,13 +2,13 @@
 // Command-line test rig for Login Relay's Windows USB accessory layer (port of macos/Tools/aoa_probe.c).
 // Not part of the app: run it on a real PC with a phone to check everything before trusting the full app.
 //
-//   LoginRelay.UsbProbe list                 what libusb sees AND what Windows sees, and which setup step applies
+//   LoginRelay.UsbProbe list                 what libusb sees, and which devices it can't open
 //   LoginRelay.UsbProbe run [location]       switch a phone into accessory mode, open it, and talk to Login Relay:
 //                                            prints every line the phone sends, pings it every 2 s, and sends what
 //                                            you type: "callback <url>", "done", or any raw JSON line.
 //
 // libusb-1.0.dll must sit next to this program. Windows can only give libusb a device that is bound to the
-// WinUSB driver; `list` says which devices are not, and `run` says which Zadig step is next.
+// WinUSB driver; `list` marks the devices it can't open, and `run` prints the libusb error code it got.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -17,7 +17,6 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
-using LoginRelay.App;
 using LoginRelay.Core;
 
 namespace LoginRelay.UsbProbe
@@ -75,37 +74,6 @@ namespace LoginRelay.UsbProbe
             }
         }
 
-        private static IReadOnlyList<PnpDevice> TryWindows(bool announce)
-        {
-            try
-            {
-                return new WmiUsbDiagnostics().QueryUsbDevices();
-            }
-            catch (Exception ex)
-            {
-                if (announce)
-                {
-                    Log("Windows (WMI): the query failed: " + ex.Message);
-                }
-                return new List<PnpDevice>();
-            }
-        }
-
-        private static void PrintState(IReadOnlyList<UsbDevice> libusb, IReadOnlyList<PnpDevice> windows)
-        {
-            UsbSetupInfo info = UsbDiagnosisLogic.Diagnose(libusb, windows);
-            Console.WriteLine();
-            Console.WriteLine("Setup state: " + info.State + (info.HasId ? "  (USB ID " + info.UsbId + ", " + info.DeviceName + ")" : ""));
-            Console.WriteLine(UsbSetupText.Title(info));
-            Console.WriteLine(UsbSetupText.Steps(info));
-            Console.Out.Flush();
-        }
-
-        private static void PrintDiagnosisNow(IReadOnlyList<UsbDevice> libusb)
-        {
-            PrintState(libusb, TryWindows(true));
-        }
-
         // ---- list -------------------------------------------------------------------------------------
 
         private static int ListCommand()
@@ -115,7 +83,7 @@ namespace LoginRelay.UsbProbe
             {
                 libusb = TryList(backend);
             }
-            Console.WriteLine("== libusb's view (devices Windows has bound to WinUSB can be opened; the others are listed but not usable) ==");
+            Console.WriteLine("== libusb's view (devices bound to WinUSB can be opened; the others are listed but not usable) ==");
             if (libusb == null)
             {
                 Console.WriteLine("(libusb is not available: is libusb-1.0.dll next to this program?)");
@@ -131,33 +99,11 @@ namespace LoginRelay.UsbProbe
                     d.Location, d.VendorId, d.ProductId, d.LooksAndroid ? "likely" : "-", d.IsAccessory ? "yes" : "-", openable, name);
             }
 
+            int blocked = libusb.Count(d => !d.Openable);
             Console.WriteLine();
-            Console.WriteLine("== Windows' view (WMI Win32_PnPEntity, USB\\VID_ only) ==");
-            IReadOnlyList<PnpDevice> windows = TryWindows(true);
-            foreach (PnpDevice p in windows.OrderBy(x => x.DeviceId, StringComparer.OrdinalIgnoreCase))
-            {
-                ushort vid, pid;
-                int mi;
-                string ids = UsbDiagnosisLogic.TryParseDeviceId(p.DeviceId, out vid, out pid, out mi)
-                    ? vid.ToString("x4") + ":" + pid.ToString("x4") + (mi >= 0 ? " MI_" + mi.ToString("x2") : "")
-                    : "?";
-                bool phoneLike = p.CompatibleIds.Any(UsbDiagnosisLogic.IsPhoneCompatibleId);
-                Console.WriteLine(
-                    "{0,-14} service={1,-12} error={2,-3} present={3,-5} {4}{5}",
-                    ids, p.Service ?? "-", p.ConfigManagerErrorCode, p.Present.HasValue ? p.Present.Value.ToString() : "?", p.Name,
-                    phoneLike ? "   <- looks like a phone" : "");
-                if (phoneLike || Aoa.IsAccessoryIds(vid, pid))
-                {
-                    Console.WriteLine("               " + p.DeviceId);
-                    Console.WriteLine("               compatible IDs: " + string.Join(", ", p.CompatibleIds));
-                }
-            }
-            if (windows.Count == 0)
-            {
-                Console.WriteLine("(nothing)");
-            }
-
-            PrintState(libusb, windows);
+            Console.WriteLine(blocked == 0
+                ? "Every device libusb lists can be opened."
+                : blocked + " device(s) are listed but libusb can't open them (no WinUSB driver, or no access). `run <location>` prints the libusb error code.");
             return 0;
         }
 
@@ -215,7 +161,6 @@ namespace LoginRelay.UsbProbe
                 if (matches.Count == 0)
                 {
                     Log("No candidate phone. Plug it in and pick “File transfer” in its USB notification, or run `list`.");
-                    PrintDiagnosisNow(all);
                     return 1;
                 }
                 if (matches.Count > 1)
@@ -241,9 +186,7 @@ namespace LoginRelay.UsbProbe
                     + (phone.IsAccessory ? " (already in accessory mode)" : ""));
                 if (!phone.Openable)
                 {
-                    Log("libusb lists it but can't open it: Windows hasn't bound it to WinUSB.");
-                    PrintDiagnosisNow(all);
-                    return 1;
+                    Log("libusb lists it but couldn't open it while listing (Windows hasn't bound it to WinUSB, or no access). Trying anyway to get the error code.");
                 }
 
                 string location = phone.Location;
@@ -256,10 +199,6 @@ namespace LoginRelay.UsbProbe
                     if (r.Code != UsbCode.Ok)
                     {
                         Log(UsbText.ErrorText(r, phone.Name));
-                        if (r.Code == UsbCode.NoDriver)
-                        {
-                            PrintDiagnosisNow(all);
-                        }
                         return 1;
                     }
 
@@ -275,11 +214,6 @@ namespace LoginRelay.UsbProbe
                             Log("accessory device appeared: " + acc.VendorId.ToString("x4") + ":" + acc.ProductId.ToString("x4")
                                 + " at " + acc.Location + " after " + s.Elapsed.TotalSeconds.ToString("0.00") + "s"
                                 + (acc.Openable ? "" : "  (but libusb can't open it)"));
-                            if (!acc.Openable)
-                            {
-                                PrintDiagnosisNow(after);
-                                return 1;
-                            }
                             location = acc.Location;
                             appeared = true;
                             break;
@@ -288,7 +222,6 @@ namespace LoginRelay.UsbProbe
                     if (!appeared)
                     {
                         Log("the phone never reappeared as an accessory that libusb can see");
-                        PrintDiagnosisNow(after);
                         return 1;
                     }
                 }
@@ -303,9 +236,8 @@ namespace LoginRelay.UsbProbe
                     catch (UsbException ex)
                     {
                         Log("open attempt " + attempt + " failed (" + Describe(ex) + ")");
-                        if (ex.Code == UsbCode.NoDriver)
+                        if (ex.Code == UsbCode.NoDriver || ex.Code == UsbCode.Permission)
                         {
-                            PrintDiagnosisNow(TryList(backend) ?? all);
                             return 1;
                         }
                         Thread.Sleep(500);

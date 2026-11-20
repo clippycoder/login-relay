@@ -2,8 +2,9 @@
 # Login Relay: lets the logged-in user talk to an Android phone over USB without root, for USB accessory
 # mode (no USB debugging needed). TAG+="uaccess" grants access to whoever is at the local seat.
 #
-# Phones that expose adb (ff4201), PTP/MTP (060101) or vendor-specific MTP (ffff00) get switched to
-# accessory mode; a phone already in accessory mode shows up as Google 18d1:2d00..2d05.
+# Phones that expose PTP/MTP (060101), vendor-specific MTP (ffff00) or the ADB interface class (ff4201,
+# which some phones list in file-transfer mode; this only recognises the phone, adb is not used) get
+# switched to accessory mode; a phone already in accessory mode shows up as Google 18d1:2d00..2d05.
 # Install:  sudo install -m 644 70-loginrelay.rules /etc/udev/rules.d/
 #           sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=usb
 ACTION=="remove", GOTO="loginrelay_end"

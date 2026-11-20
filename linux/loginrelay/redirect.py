@@ -165,7 +165,8 @@ class RelayRequest:
 
 
 def shell_quote(s: str) -> str:
-    """Quotes a string for the phone's shell (`adb shell` joins its arguments and re-parses them)."""
+    """Quotes a string for a POSIX shell. Nothing in this app needs it any more; it stays because
+    tests/vectors.json shares these cases with the other desktop apps."""
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 

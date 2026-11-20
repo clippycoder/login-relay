@@ -13,8 +13,6 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <DebugType>none</DebugType>
-    <!-- System.Management is Windows-only; this tool only makes sense there. -->
-    <NoWarn>$(NoWarn);CA1416</NoWarn>
     <!-- One self-contained exe, like the app. libusb-1.0.dll goes next to it. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -25,12 +23,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\LoginRelay.Core\LoginRelay.Core.csproj" />
-    <PackageReference Include="System.Management" Version="8.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- The same WMI code the app uses for its driver guide. -->
-    <Compile Include="..\..\src\LoginRelay.App\WmiUsbDiagnostics.cs" Link="WmiUsbDiagnostics.cs" />
   </ItemGroup>
 
   <ItemGroup>

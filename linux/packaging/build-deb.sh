@@ -49,7 +49,7 @@ exec python3 -m loginrelay "$@"
 LAUNCHER
 chmod 755 "$stage/usr/bin/loginrelay"
 
-# Menu entry, icons, tray icons, phone app
+# Menu entry, icons, tray icons, phone app (shipped for people to find; nothing in the app installs it)
 put 644 "$linux/data/io.github.clippycoder.LoginRelay.desktop" \
   "$stage/usr/share/applications/io.github.clippycoder.LoginRelay.desktop"
 (cd "$linux/data/icons" && find hicolor -type f -name '*.png') | while read -r icon; do
@@ -79,14 +79,14 @@ Priority: optional
 Architecture: all
 Installed-Size: $size
 Maintainer: clippycoder <clippycoder@users.noreply.github.com>
-Depends: python3 (>= 3.9), python3-gi, python3-usb, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, adb | android-tools-adb
+Depends: python3 (>= 3.9), python3-gi, python3-usb, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1
 Recommends: xdg-utils
 Homepage: https://github.com/clippycoder/login-relay
 Description: Browser sign-ins for Android phones that have no browser
  Login Relay answers an Android app's request to open a sign-in page on a
  USB-connected phone by opening the page in this computer's browser, catching
- the redirect back to the app, and handing it to the phone with adb, or over
- a plain USB connection (USB accessory mode) that needs no USB debugging.
+ the redirect back to the app, and handing it to the phone over a plain USB
+ connection (USB accessory mode). USB debugging is not needed.
  .
  It runs as a tray icon. For the length of one sign-in it becomes the default
  handler for the app's return address (a custom URL scheme) and puts the

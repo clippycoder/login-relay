@@ -6,13 +6,13 @@ using System.Collections.Generic;
 
 namespace LoginRelay.Core
 {
-    public enum TransportKind
+    /// <summary>The phone the engine is talking to (or about to). <see cref="Serial"/> is "usb:" + the port location.</summary>
+    public sealed record Device(string Serial, string Name)
     {
-        /// <summary>adb over USB debugging (or wireless debugging).</summary>
-        Adb,
-
-        /// <summary>USB accessory mode: no USB debugging needed.</summary>
-        Usb,
+        public string Title
+        {
+            get { return Name.Length == 0 ? Serial : Name; }
+        }
     }
 
     public static class Aoa
@@ -103,7 +103,7 @@ namespace LoginRelay.Core
             get { return Location; }
         }
 
-        /// <summary>"18D1 2D00", the way Zadig shows a USB ID.</summary>
+        /// <summary>"18D1 2D00".</summary>
         public string UsbId
         {
             get { return VendorId.ToString("X4") + " " + ProductId.ToString("X4"); }
@@ -257,6 +257,25 @@ namespace LoginRelay.Core
     {
         public const string NeedsLibusb = "USB mode needs libusb-1.0.dll next to LoginRelay.exe.";
 
+        /// <summary>The one status shown when the phone is plugged in but libusb can't open it.</summary>
+        public const string CantOpenHeadline = "Can't open the phone";
+
+        public const string CantOpenDetail = "Login Relay needs a WinUSB driver for the phone. See “Windows drivers” in the README (github.com/clippycoder/login-relay).";
+
+        /// <summary>No phone found: the same wording on every screen.</summary>
+        public const string NoPhoneHeadline = "No phone found over USB";
+
+        public const string NoPhoneDetail = "Plug the phone in and choose “File transfer” in its USB notification. USB debugging isn't needed.";
+
+        /// <summary>Does this failure mean "libusb can't use that device" (no WinUSB driver, no access, not supported)?</summary>
+        public static bool IsCantOpen(int code)
+        {
+            return code == UsbCode.NoDriver
+                || code == UsbCode.Permission
+                || code == UsbCode.Unsupported
+                || code == UsbCode.Open;
+        }
+
         /// <summary>The libusb name of a (negative) libusb error code, for diagnostics.</summary>
         public static string LibusbErrorName(int code)
         {
@@ -280,7 +299,7 @@ namespace LoginRelay.Core
                 case UsbCode.Permission:
                     return "Windows won't let Login Relay use " + name + " over USB.";
                 case UsbCode.NoDriver:
-                    return "Windows hasn't given Login Relay access to " + name + " yet: it needs the WinUSB driver.";
+                    return CantOpenDetail;
                 default:
                     return "Couldn't switch " + name + " to accessory mode (error " + r.Code + ").";
             }

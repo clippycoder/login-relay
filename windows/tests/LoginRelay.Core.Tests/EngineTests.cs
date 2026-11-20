@@ -9,8 +9,8 @@ using Xunit;
 namespace LoginRelay.Core.Tests
 {
     /// <summary>
-    /// The engine against a fake adb, a fake platform and a fake phone listening on a real local socket.
-    /// A test "UI thread" stands in for the WinForms one.
+    /// The engine against a fake platform and a fake phone listening on a real local socket, reached the way
+    /// LOGINRELAY_FAKE_PHONE does it (TcpPhoneBackend). A test "UI thread" stands in for the WinForms one.
     /// </summary>
     public class EngineTests
     {
@@ -41,7 +41,6 @@ namespace LoginRelay.Core.Tests
             public readonly TestDispatcher Ui = new TestDispatcher();
             public readonly FakePlatform Platform = new FakePlatform();
             public readonly FakePhone Phone;
-            public readonly FakeAdb Adb;
             public readonly RelayEngine Engine;
             private readonly string _dir;
 
@@ -49,22 +48,28 @@ namespace LoginRelay.Core.Tests
             {
                 Phone = phone;
                 Platform.AllowClaims = allowClaims;
-                Adb = new FakeAdb(phone.Port);
                 _dir = Path.Combine(Path.GetTempPath(), "loginrelay-test-" + Guid.NewGuid().ToString("N"));
                 var prefs = new Prefs(Path.Combine(_dir, "prefs.json"));
                 Engine = new RelayEngine(Ui, Platform, prefs);
-                Engine.AdbFactory = ignored => Adb;
+                Engine.UsbBackendFactory = () => new TcpPhoneBackend("127.0.0.1", phone.Port);
                 Engine.BrowserDisabled = true;
                 Engine.DoneDelay = TimeSpan.FromMilliseconds(50);
                 Engine.PlainLinkDoneDelay = TimeSpan.FromMilliseconds(50);
                 Engine.CheckInterval = TimeSpan.FromSeconds(1);
                 Engine.RetryDelay = TimeSpan.FromMilliseconds(100);
+                Engine.UsbPingInterval = TimeSpan.FromMilliseconds(200);
+                Engine.UsbSilence = TimeSpan.FromSeconds(3);
                 Ui.Invoke(() => Engine.Start());
             }
 
             public bool Active()
             {
                 return Ui.Invoke(() => Engine.Active != null);
+            }
+
+            public bool Logged(string text)
+            {
+                return Ui.Invoke(() => Engine.LogLines.Any(l => l.Text == text));
             }
 
             public void Dispose()
@@ -115,25 +120,24 @@ namespace LoginRelay.Core.Tests
                 // Wrong state: ignored, still waiting, still claimed.
                 rig.Ui.Invoke(() => rig.Engine.ReceiveCallback(Callback + "?code=EVIL&state=other"));
                 Thread.Sleep(300);
-                Assert.Empty(rig.Adb.Delivered);
+                Assert.Empty(rig.Phone.CallbackUrls);
                 Assert.True(rig.Active());
                 Assert.False(claim.Released);
 
                 // Another app's address: ignored silently.
                 rig.Ui.Invoke(() => rig.Engine.ReceiveCallback("com.other.app://x/y?state=S1"));
-                Assert.Empty(rig.Adb.Delivered);
+                Assert.Empty(rig.Phone.CallbackUrls);
 
-                // The right one: handed to the phone, claim released, phone told "done".
+                // The right one: sent to the phone (which hands it to the app), claim released.
                 string good = Callback + "?code=GOOD&state=S1";
                 rig.Ui.Invoke(() => rig.Engine.ReceiveCallback(good));
-                Assert.True(WaitFor(() => rig.Adb.Delivered.Length == 1), "the address reached adb");
-                Delivery delivery = rig.Adb.Delivered[0];
-                Assert.Equal(good, delivery.Url);
-                Assert.Equal("com.example.app", delivery.Package);
-                Assert.Equal("FAKE0001", delivery.Serial);
+                Assert.True(WaitFor(() => rig.Phone.CallbackUrls.Count == 1), "the address reached the phone");
+                Assert.Equal(good, rig.Phone.CallbackUrls.ToArray()[0]);
                 Assert.True(claim.Released);
                 Assert.False(rig.Active());
-                Assert.True(WaitFor(() => rig.Phone.Got("\"type\":\"done\"")), "the phone was told it's done");
+                Assert.True(WaitFor(() => rig.Logged("Done: Example App is finishing the sign-in.")), "the phone confirmed delivery");
+                // The computer doesn't send "done" after a callback: the phone closes itself.
+                Assert.False(rig.Phone.Got("\"type\":\"done\""));
             }
         }
 
@@ -151,7 +155,7 @@ namespace LoginRelay.Core.Tests
 
                 rig.Ui.Invoke(() => rig.Engine.ReceiveCallback(Callback + "?code=LATE&state=S2"));
                 Thread.Sleep(300);
-                Assert.Empty(rig.Adb.Delivered);
+                Assert.Empty(rig.Phone.CallbackUrls);
             }
         }
 
@@ -167,12 +171,12 @@ namespace LoginRelay.Core.Tests
 
                 string? problem = rig.Ui.Invoke(() => prompt.Check("https://elsewhere.example/cb?code=1"));
                 Assert.Equal("That isn't this app's return address. Try again.", problem);
-                Assert.Empty(rig.Adb.Delivered);
+                Assert.Empty(rig.Phone.CallbackUrls);
 
                 string? accepted = rig.Ui.Invoke(() => prompt.Check("  https://app.example/cb?code=1  "));
                 Assert.Null(accepted);
-                Assert.True(WaitFor(() => rig.Adb.Delivered.Length == 1), "the pasted address reached adb");
-                Assert.Equal("https://app.example/cb?code=1", rig.Adb.Delivered[0].Url);
+                Assert.True(WaitFor(() => rig.Phone.CallbackUrls.Count == 1), "the pasted address reached the phone");
+                Assert.Equal("https://app.example/cb?code=1", rig.Phone.CallbackUrls.ToArray()[0]);
                 Assert.True(prompt.Closed, "the prompt was dismissed");
             }
         }
@@ -191,7 +195,7 @@ namespace LoginRelay.Core.Tests
 
                 string? accepted = rig.Ui.Invoke(() => prompt.Check(Callback + "?code=1&state=S3"));
                 Assert.Null(accepted);
-                Assert.True(WaitFor(() => rig.Adb.Delivered.Length == 1), "the pasted address reached adb");
+                Assert.True(WaitFor(() => rig.Phone.CallbackUrls.Count == 1), "the pasted address reached the phone");
             }
         }
 
@@ -204,6 +208,18 @@ namespace LoginRelay.Core.Tests
                 (string status, string detail) = rig.Ui.Invoke(() => rig.Engine.Describe());
                 Assert.Equal("Fake Phone is ready", status);
                 Assert.Equal("Sign in to an app on the phone and the page opens here.", detail);
+            }
+        }
+
+        [Fact]
+        public void TheFakePhoneIsOneUsbPhone()
+        {
+            using (var rig = new Rig(new FakePhone(null)))
+            {
+                Assert.True(WaitFor(() => rig.Ui.Invoke(() => rig.Engine.Phase.Kind == PhaseKind.Ready)), "ready");
+                // The status names the one fake phone and nothing about drivers or adb.
+                Assert.Equal("Fake Phone", rig.Ui.Invoke(() => rig.Engine.Phone!.Title));
+                Assert.True(rig.Logged("USB connection open."));
             }
         }
     }

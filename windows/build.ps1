@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Builds Login Relay for Windows: runs the Core tests, publishes one self-contained LoginRelay.exe into
-# windows\publish, puts the phone app and libusb next to it, publishes the USB probe tool into windows\publish\probe,
+# windows\publish, puts the phone app (for convenience: the Windows app itself never installs it) and libusb next to it, publishes the USB probe tool into windows\publish\probe,
 # and zips the lot.
 #
 #   powershell -ExecutionPolicy Bypass -File windows\build.ps1
 #
 # Environment (all optional):
 #   LOGINRELAY_APK   the phone app to bundle (default ..\android\build\login-relay.apk; skipped with a warning if missing)
-#   PHONE_VERSION    the phone app's version (default: VERSION_NAME= in ..\android\build.sh)
 #   SKIP_TESTS=1     publish without running the tests first
 #   GITHUB_TOKEN     (or GH_TOKEN) used for the GitHub API call that verifies the libusb download (avoids rate limits)
 #
@@ -116,30 +115,14 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish (probe) failed (exit code $LAST
 Copy-Item -LiteralPath $LibusbDll -Destination (Join-Path $Probe 'libusb-1.0.dll') -Force
 Copy-Item -LiteralPath $LibusbLicense -Destination (Join-Path $Probe 'libusb-COPYING.txt') -Force
 
-# The phone app, so the tray menu can install it.
+# The phone app, bundled for convenience (the Windows app doesn't install it; USB accessory mode needs no adb).
 $Apk = if ($env:LOGINRELAY_APK) { $env:LOGINRELAY_APK } else { Join-Path $PSScriptRoot '..\android\build\login-relay.apk' }
 if (Test-Path -LiteralPath $Apk) {
     $ApkTarget = Join-Path $Publish 'login-relay.apk'
     Copy-Item -LiteralPath $Apk -Destination $ApkTarget -Force
     $Files += $ApkTarget
-
-    $PhoneVersion = $env:PHONE_VERSION
-    if (-not $PhoneVersion) {
-        $BuildSh = Join-Path $PSScriptRoot '..\android\build.sh'
-        if (Test-Path -LiteralPath $BuildSh) {
-            $Match = Select-String -LiteralPath $BuildSh -Pattern '^VERSION_NAME=(.+)$' | Select-Object -First 1
-            if ($Match) { $PhoneVersion = $Match.Matches[0].Groups[1].Value.Trim().Trim('"') }
-        }
-    }
-    if ($PhoneVersion) {
-        $VersionFile = Join-Path $Publish 'phone-app-version.txt'
-        Set-Content -LiteralPath $VersionFile -Value $PhoneVersion -NoNewline -Encoding ascii
-        $Files += $VersionFile
-    } else {
-        Write-Warning 'Could not work out the phone app version; the app will not offer updates.'
-    }
 } elseif ($env:GITHUB_ACTIONS -eq 'true') {
-    # A release without the phone app can't install it; don't let CI ship one quietly.
+    # A release without the phone app would be incomplete; don't let CI ship one quietly.
     throw "$Apk not found; refusing to build a package without the phone app inside."
 } else {
     Write-Warning "$Apk not found; building without the phone app inside (run android\build.sh first)."

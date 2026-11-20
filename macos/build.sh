@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Builds "Login Relay.app" (universal) and a zip, with the Command Line Tools only; no Xcode.
 #
-# Bundles ../android/build/login-relay.apk if it exists (run android/build.sh first), so the app
-# can install Login Relay on the phone itself.
+# Bundles ../android/build/login-relay.apk if it exists (run android/build.sh first) so users can find it
+# inside the app; the app itself installs nothing (the phone connects over USB accessory mode).
 #
 # Signing: CODESIGN_IDENTITY="Developer ID Application: …" for a real signature; otherwise ad-hoc,
 # which macOS will warn about on first launch of a downloaded copy.
@@ -13,7 +13,6 @@ cd "$(dirname "$0")"
 VERSION=0.5.0
 BUILD=1
 APK=../android/build/login-relay.apk
-PHONE_VERSION="$(sed -n 's/^VERSION_NAME=//p' ../android/build.sh)"
 APP="build/Login Relay.app"
 
 rm -rf build
@@ -30,7 +29,7 @@ lipo -create -output build/LoginRelay build/LoginRelay-arm64 build/LoginRelay-x8
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp build/LoginRelay "$APP/Contents/MacOS/LoginRelay"
-sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" -e "s/@PHONE_VERSION@/$PHONE_VERSION/" \
+sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" \
   Info.plist.in > "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns Resources/MenuBarIcon*.png "$APP/Contents/Resources/"
 if [ -f "$APK" ]; then
@@ -44,5 +43,5 @@ codesign --verify --strict "$APP"
 
 ZIP="build/Login-Relay-macOS-$VERSION.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
-echo "built $APP ($VERSION, phone app ${PHONE_VERSION})"
+echo "built $APP ($VERSION)"
 echo "      $ZIP"

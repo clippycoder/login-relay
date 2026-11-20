@@ -10,10 +10,10 @@
 //   --verbose        also write every activity-log line to standard error
 //
 // Environment hooks (used by tests/e2e/run_e2e.py; keep them):
-//   LOGINRELAY_ADB=<path>      use exactly this adb (may be a .cmd wrapper)
+//   LOGINRELAY_FAKE_PHONE=<host:port>   don't touch libusb: act as if one USB phone ("Fake Phone") were plugged in,
+//                                       whose pipe is a plain TCP connection to host:port
 //   LOGINRELAY_BROWSER=none    don't open the sign-in page in a browser
 //   LOGINRELAY_LOG=<file>      append every activity-log line to this file
-//   LOGINRELAY_TRANSPORT=adb|usb   pin the connection type, overriding the saved choice
 using System;
 using System.IO;
 using System.IO.Pipes;
