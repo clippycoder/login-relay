@@ -102,6 +102,8 @@ jobs:
             xvfb dbus-x11 xdg-utils dpkg-dev
       - name: Unit tests
         run: python3 -m unittest discover -s linux/tests -v
+      - name: Phone app redirect checks (shared vectors, plain JVM)
+        run: bash android/tests/run.sh
       - name: Fetch the phone app
         run: bash .github/scripts/fetch-apk.sh "$RELEASE_TAG"
         env:

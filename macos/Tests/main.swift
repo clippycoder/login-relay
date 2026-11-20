@@ -70,6 +70,21 @@ check(shellQuote("a b") == "'a b'", "quote simple")
 check(shellQuote("it's") == "'it'\"'\"'s'", "quote apostrophe")
 check(shellQuote("x;rm -rf /") == "'x;rm -rf /'", "quote metachars")
 
+// USB framing
+let frame = { (n: Int) in usbFrame(Data(repeating: 0x41, count: n)) }
+check(frame(10).count == 11 && frame(10).last == 0x0A, "frame adds a newline")
+check(frame(63).count == 65, "63 + newline = 64 bytes needs a pad")
+check(frame(64).count == 65 && frame(64)[64] == 0x0A, "64 + newline = 65, no pad needed")
+check(frame(511).count == 513, "511 + newline = 512 bytes gets padded")
+check(frame(1023).count == 1025, "1023 + newline = 1024 bytes gets padded")
+check(frame(62).count == 63, "no padding when not a multiple of 64")
+var splitter = LineSplitter()
+check(splitter.feed(Data("{\"a\":1}\n{\"b\"".utf8))?.count == 1, "first line complete, second held")
+let second = splitter.feed(Data(":2}\n\n\n{\"c\":3}\n".utf8))
+check(second?.count == 2 && String(decoding: second![0], as: UTF8.self) == "{\"b\":2}", "held bytes joined, blank lines skipped")
+var broken = LineSplitter()
+check(broken.feed(Data(repeating: 0x41, count: LineSplitter.maxLine + 1)) == nil, "runaway line is rejected")
+
 // only web pages get opened
 check(isWebURL("https://example.com/a?b=c") && isWebURL("HTTP://example.com"), "web URLs")
 check(!isWebURL("file:///etc/passwd") && !isWebURL("com.example.app://cb") && !isWebURL("javascript:alert(1)") && !isWebURL("no scheme"), "non-web URLs refused")

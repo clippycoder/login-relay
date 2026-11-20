@@ -105,7 +105,8 @@ class Run:
         self.phone = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_phone.py"), "--state", self.state,
                                        "--referrer", f"android-app://{PACKAGE}", *phone_args])
         self.wait(lambda: os.path.exists(self.p("phone_port")), 10, "fake phone to listen")
-        env = dict(os.environ, LOGINRELAY_ADB=self.adb, LOGINRELAY_BROWSER="none", FAKE_ADB_STATE=self.state)
+        env = dict(os.environ, LOGINRELAY_ADB=self.adb, LOGINRELAY_BROWSER="none", LOGINRELAY_TRANSPORT="adb",
+                   FAKE_ADB_STATE=self.state)
         self.app = subprocess.Popen(app_cmd, env=env)
 
     def p(self, name):

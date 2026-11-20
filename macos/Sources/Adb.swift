@@ -8,6 +8,8 @@ struct Device: Equatable {
     let model: String
 
     var isUsable: Bool { state == "device" }
+    /// A phone reached over a USB accessory pipe rather than adb (serial "usb:<location>").
+    var isUSB: Bool { serial.hasPrefix("usb:") }
     var title: String { model.isEmpty ? serial : model.replacingOccurrences(of: "_", with: " ") }
 }
 

@@ -5,5 +5,5 @@ set -euo pipefail
 cd "$(dirname "$0")"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-swiftc -swift-version 5 -o "$out/tests" ../Sources/Redirect.swift main.swift
+swiftc -swift-version 5 -o "$out/tests" ../Sources/Redirect.swift ../Sources/UsbFraming.swift main.swift
 "$out/tests" ../../tests/vectors.json

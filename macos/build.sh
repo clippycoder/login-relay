@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION=0.4.0
+VERSION=0.5.0
 BUILD=1
 APK=../android/build/login-relay.apk
 PHONE_VERSION="$(sed -n 's/^VERSION_NAME=//p' ../android/build.sh)"
@@ -20,7 +20,11 @@ rm -rf build
 mkdir -p build
 
 for arch in arm64 x86_64; do
-  swiftc -O -swift-version 5 -target "$arch-apple-macos13.0" -o "build/LoginRelay-$arch" Sources/*.swift
+  # The USB accessory layer is C over IOKit; compile it per architecture and link it into the Swift binary.
+  clang -c -O2 -Wall -Wno-deprecated-declarations -arch "$arch" -mmacosx-version-min=13.0 \
+    Sources/aoa_mac.c -o "build/aoa_mac-$arch.o"
+  swiftc -O -swift-version 5 -target "$arch-apple-macos13.0" -import-objc-header Sources/Bridging.h \
+    -o "build/LoginRelay-$arch" Sources/*.swift "build/aoa_mac-$arch.o" -framework IOKit -framework CoreFoundation
 done
 lipo -create -output build/LoginRelay build/LoginRelay-arm64 build/LoginRelay-x86_64
 
@@ -35,7 +39,7 @@ else
   echo "note: $APK not found; the app will be built without the phone app inside" >&2
 fi
 
-codesign --force --options runtime --sign "${CODESIGN_IDENTITY:--}" "$APP"
+codesign --force --options runtime --entitlements LoginRelay.entitlements --sign "${CODESIGN_IDENTITY:--}" "$APP"
 codesign --verify --strict "$APP"
 
 ZIP="build/Login-Relay-macOS-$VERSION.zip"

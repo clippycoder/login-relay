@@ -120,8 +120,13 @@ final class ActivityWindowController: NSWindowController {
         case .needsApp:
             if engine.bundledAPK != nil { offer(actionButton, "Install on Phone", { self.engine.installPhoneApp() }, primary: true) }
         case .ready:
-            offer(actionButton, "Open on Phone", { self.engine.openOnPhone() }, primary: true)
-            if engine.phoneAppIsOutdated { offer(secondaryButton, "Update on Phone", { self.engine.installPhoneApp() }, primary: false) }
+            // Opening and updating the phone app go through adb, so they're for the adb connection only.
+            if engine.transport == .adb {
+                offer(actionButton, "Open on Phone", { self.engine.openOnPhone() }, primary: true)
+                if engine.phoneAppIsOutdated { offer(secondaryButton, "Update on Phone", { self.engine.installPhoneApp() }, primary: false) }
+            }
+        case .connecting:
+            offer(actionButton, "Check Again", { self.engine.checkAgain() }, primary: true)
         case .working:
             offer(actionButton, "Cancel", { self.engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }, primary: true)
         case .noPhone, .unauthorized:
@@ -142,7 +147,13 @@ final class ActivityWindowController: NSWindowController {
         case .noAdb:
             return ("adb not found", "Login Relay talks to the phone through adb, part of Android platform-tools.")
         case .noPhone:
+            if engine.transport == .usb {
+                return ("No phone found over USB",
+                        "Plug the phone in and choose \u{201C}File transfer\u{201D} in its USB notification. USB debugging isn't needed.")
+            }
             return ("No phone connected", "Plug the phone in with USB and turn on USB debugging (Settings → Developer options).")
+        case .connecting(let d, let detail):
+            return ("Connecting to \(d.title)…", detail.isEmpty ? "Waiting for the phone." : detail)
         case .unauthorized(let d):
             if d.state == "unauthorized" {
                 return ("\(d.title) is waiting for you", "Tap Allow on the phone's \"Allow USB debugging?\" prompt.")
@@ -152,7 +163,7 @@ final class ActivityWindowController: NSWindowController {
             return ("Login Relay isn't on \(d.title)",
                     engine.bundledAPK != nil ? "Install it on the phone to start." : "Install login-relay.apk on the phone.")
         case .ready(let d):
-            let outdated = engine.phoneAppIsOutdated ? " An update for the phone app is available." : ""
+            let outdated = engine.transport == .adb && engine.phoneAppIsOutdated ? " An update for the phone app is available." : ""
             return ("\(d.title) is ready", "Sign in to an app on the phone and the page opens here.\(outdated)")
         case .working(let flow):
             return ("\(flow.request.appName) \(flow.request.verb) in progress",

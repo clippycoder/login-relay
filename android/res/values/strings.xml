@@ -6,7 +6,7 @@
     <string name="idle_detail">This phone has no web browser. When an app wants to open a sign-in page, Login Relay sends it to your computer, and you sign in there.</string>
 
     <string name="waiting_title">Continue on your computer</string>
-    <string name="waiting_detail">Connect this phone to your computer with USB debugging on and start the Login Relay app there. The page will open on the computer.</string>
+    <string name="waiting_detail">Connect this phone to your computer and start the Login Relay app there. The page will open on the computer.</string>
 
     <string name="sent_title">Finish on your computer</string>
     <string name="sent_detail">The page is open in your computer\'s browser. When you\'re done there, you\'ll come back to the app here.</string>
@@ -14,6 +14,7 @@
     <string name="dropped_title">Computer disconnected</string>
     <string name="dropped_detail">Start Login Relay on your computer again to continue signing in.</string>
 
+    <string name="usb_open_failed">Couldn\'t open the USB connection. Unplug the cable and plug it in again.</string>
     <string name="bind_failed">Login Relay is already running in another window.</string>
 
     <string name="request_app">App: %1$s</string>
@@ -21,6 +22,8 @@
     <string name="unknown_app">an app</string>
 
     <string name="computer_connected">● Computer connected</string>
+    <string name="computer_connected_usb">● Computer connected (USB)</string>
+    <string name="computer_connected_usb_named">● %1$s connected (USB)</string>
     <string name="computer_waiting">○ Waiting for a computer</string>
 
     <string name="command_label">Get the Login Relay app for your computer:</string>

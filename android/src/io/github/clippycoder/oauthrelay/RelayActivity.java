@@ -2,14 +2,25 @@
 package io.github.clippycoder.oauthrelay;
 
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.hardware.usb.UsbAccessory;
+import android.hardware.usb.UsbManager;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
@@ -19,28 +30,45 @@ import android.widget.TextView;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
  * Stands in for a browser. When an app asks to open a web page (usually an OAuth sign-in page),
- * this activity holds it and serves it on the abstract unix socket "oauthrelay". The computer-side
- * helper reaches that socket through `adb forward`, opens the page in a real browser, catches the
- * redirect, and sends it back to the app with `adb shell am start`. The page never loads on the
- * phone.
+ * this activity holds it and hands it to a Login Relay desktop app, which opens it in a real
+ * browser and catches the redirect. The page never loads on the phone.
  *
- * Protocol, newline-delimited JSON:
- *   phone to computer: {"v":1,"type":"open","url":..,"referrer":..,"label":..}, {"type":"cancel"}
- *   computer to phone: {"type":"status","text":..}, {"type":"error","text":..}, {"type":"done"}
+ * Two ways to reach the computer, both carrying the same newline-delimited JSON:
+ *  - adb: an abstract unix socket "oauthrelay" that the computer reaches with `adb forward`. The
+ *    computer returns the redirect with `adb shell am start`.
+ *  - USB accessory mode (AOA): no USB debugging needed. The computer switches the phone into
+ *    accessory mode over the cable and Android connects this app to it. The computer sends the
+ *    redirect as a "callback" message and the phone hands it to the app itself.
+ *
+ * Messages:
+ *   phone to computer: {"v":1,"type":"hello","transport":..,"version":..},
+ *                      {"v":1,"type":"open","url":..,"referrer":..,"label":..}, {"type":"cancel"},
+ *                      {"type":"pong"}, {"type":"delivered"}
+ *   computer to phone: {"type":"status","text":..}, {"type":"error","text":..}, {"type":"done"},
+ *                      {"type":"callback","url":..}, {"type":"ping"}
  */
 public class RelayActivity extends Activity {
     static final String TAG = "OAuthRelay";
     static final String SOCKET_NAME = "oauthrelay";
+    static final String ACTION_USB_PERMISSION = "io.github.clippycoder.oauthrelay.USB_PERMISSION";
     // Where to get the computer side. Shown on the phone's own screen.
     static final String HOST_COMMAND = "github.com/clippycoder/login-relay";
+
+    // Reads from an accessory must use a buffer of at least 16 KiB: a partial read drops the rest of
+    // the transfer.
+    private static final int READ_BUFFER = 16384;
+    private static final int MAX_LINE = 1024 * 1024;
+    private static final long FINISH_DELAY_MS = 1500;
 
     // Only adb (shell) and root may talk to the relay; any app could otherwise connect to an
     // abstract socket.
@@ -48,6 +76,11 @@ public class RelayActivity extends Activity {
     private static final int UID_SHELL = 2000;
 
     private enum State { IDLE, WAITING, SENT, DROPPED }
+
+    /** The USB link outlives any one screen; see UsbLink. */
+    private static volatile UsbLink sUsb;
+
+    private final Handler main = new Handler(Looper.getMainLooper());
 
     private TextView titleView;
     private TextView detailView;
@@ -61,9 +94,12 @@ public class RelayActivity extends Activity {
     private volatile String pendingReferrer;
     private volatile String pendingLabel;
     private volatile boolean closing;
-    private volatile OutputStream client;
-    private volatile LocalSocket clientSocket;
+    private volatile Link link;
+    private Link helloedLink;  // the link we've already said hello on, so a re-adopt doesn't repeat it
     private LocalServerSocket server;
+    private BroadcastReceiver permissionReceiver;
+
+    // ------------------------------------------------------------------ lifecycle
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,6 +124,7 @@ public class RelayActivity extends Activity {
         });
 
         startServer();
+        adoptUsb(null);
         handle(getIntent());
     }
 
@@ -109,6 +146,18 @@ public class RelayActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        closing = true;
+        // The USB link stays open (see UsbLink); it just has no screen to report to for now.
+        UsbLink u = sUsb;
+        if (u != null && u.owner == this) {
+            u.owner = null;
+        }
+        if (permissionReceiver != null) {
+            try {
+                unregisterReceiver(permissionReceiver);
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
         stopServer();
         super.onDestroy();
     }
@@ -116,6 +165,11 @@ public class RelayActivity extends Activity {
     // ------------------------------------------------------------------ UI
 
     private void handle(Intent intent) {
+        if (intent != null && UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(intent.getAction())) {
+            // The computer just switched this phone into accessory mode. Don't touch the sign-in UI.
+            adoptUsb((UsbAccessory) intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY));
+            return;
+        }
         Uri data = intent == null ? null : intent.getData();
         if (data == null) {
             show(State.IDLE, null);
@@ -124,16 +178,30 @@ public class RelayActivity extends Activity {
         pendingUrl = data.toString();
         Uri ref = getReferrer();
         pendingReferrer = ref == null ? null : ref.toString();
-        String caller = ref != null && "android-app".equals(ref.getScheme()) ? ref.getHost() : null;
+        String caller = callerPackage();
         pendingLabel = caller == null ? null : appLabel(caller);
         requestApp.setText(getString(R.string.request_app, appLabel(caller)));
         requestSite.setText(getString(R.string.request_site, data.getHost()));
         Log.i(TAG, "page from " + caller + " for host " + data.getHost());
-        if (client != null) {
+        if (link != null) {
             sendOpen();
         } else {
             show(State.WAITING, null);
         }
+    }
+
+    /** Package name of the app that asked for the page, from the "android-app://<package>" referrer. */
+    private String callerPackage() {
+        String r = pendingReferrer;
+        if (r == null || !r.startsWith("android-app://")) {
+            return null;
+        }
+        String rest = r.substring("android-app://".length());
+        int slash = rest.indexOf('/');
+        if (slash >= 0) {
+            rest = rest.substring(0, slash);
+        }
+        return rest.isEmpty() ? null : rest;
     }
 
     private String appLabel(String pkg) {
@@ -191,8 +259,9 @@ public class RelayActivity extends Activity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                boolean on = client != null;
-                connectionView.setText(on ? R.string.computer_connected : R.string.computer_waiting);
+                Link l = link;
+                boolean on = l != null;
+                connectionView.setText(on ? l.describe(RelayActivity.this) : getString(R.string.computer_waiting));
                 // Resources.getColor(int) rather than Context.getColor: the latter needs API 23.
                 connectionView.setTextColor(
                         getResources().getColor(on ? R.color.ok : R.color.warn));
@@ -216,7 +285,143 @@ public class RelayActivity extends Activity {
         finish();
     }
 
-    // ------------------------------------------------------------------ socket
+    // ------------------------------------------------------------------ links
+
+    /** A connection to a computer. */
+    private interface Link {
+        boolean send(String json);
+
+        String describe(Context context);
+
+        String transport();
+    }
+
+    private interface LineSink {
+        void onLine(String line);
+    }
+
+    /** Splits a byte stream into UTF-8 lines. Reads in 16 KiB chunks, as accessory mode requires. */
+    private static void pumpLines(InputStream in, LineSink sink) throws IOException {
+        byte[] buf = new byte[READ_BUFFER];
+        ByteArrayOutputStream line = new ByteArrayOutputStream();
+        int n;
+        while ((n = in.read(buf)) >= 0) {
+            for (int i = 0; i < n; i++) {
+                byte b = buf[i];
+                if (b == '\n') {
+                    if (line.size() > 0) {
+                        String s = new String(line.toByteArray(), StandardCharsets.UTF_8);
+                        line.reset();
+                        sink.onLine(s);
+                    }
+                } else if (line.size() >= MAX_LINE) {
+                    throw new IOException("line too long");
+                } else {
+                    line.write(b);
+                }
+            }
+        }
+    }
+
+    private synchronized boolean send(String json) {
+        Link l = link;
+        return l != null && l.send(json);
+    }
+
+    /** Called when a computer connects, or when this screen takes over an existing connection. */
+    private void onLinkUp() {
+        updateConnection();
+        Link l = link;
+        if (l != null && l != helloedLink) {
+            helloedLink = l;
+            try {
+                JSONObject hello = new JSONObject();
+                hello.put("v", 1);
+                hello.put("type", "hello");
+                hello.put("transport", l.transport());
+                hello.put("version", versionName());
+                send(hello.toString());
+            } catch (JSONException e) {
+                Log.w(TAG, "encode failed", e);
+            }
+        }
+        if (pendingUrl != null) {
+            sendOpen();
+        }
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return "";
+        }
+    }
+
+    /** The link ended. Called on the link's reader thread. */
+    private void linkLost(Link l) {
+        if (link != l) {
+            return;
+        }
+        link = null;
+        if (!closing) {
+            if (pendingUrl != null) {
+                show(State.DROPPED, null);
+            } else {
+                updateConnection();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ adb link
+
+    private static final class AdbLink implements Link {
+        private final LocalSocket socket;
+        private final OutputStream out;
+
+        AdbLink(LocalSocket socket) throws IOException {
+            this.socket = socket;
+            this.out = socket.getOutputStream();
+        }
+
+        @Override
+        public synchronized boolean send(String json) {
+            try {
+                out.write((json + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                return true;
+            } catch (IOException e) {
+                Log.w(TAG, "send failed", e);
+                return false;
+            }
+        }
+
+        @Override
+        public String describe(Context c) {
+            return c.getString(R.string.computer_connected);
+        }
+
+        @Override
+        public String transport() {
+            return "adb";
+        }
+
+        void close() {
+            // close() alone neither wakes the thread blocked reading nor sends EOF to adb; shutdown does both.
+            try {
+                socket.shutdownInput();
+            } catch (IOException ignored) {
+            }
+            try {
+                socket.shutdownOutput();
+            } catch (IOException ignored) {
+            }
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
 
     private void startServer() {
         try {
@@ -237,7 +442,6 @@ public class RelayActivity extends Activity {
     }
 
     private void stopServer() {
-        closing = true;
         if (server == null) {
             return;
         }
@@ -254,19 +458,9 @@ public class RelayActivity extends Activity {
         }
         // Also drop the computer's connection; otherwise the helper stays attached to this dead
         // instance and never reaches the next Login Relay screen.
-        // close() alone neither wakes the thread blocked reading it nor sends EOF to adb;
-        // shutdown does both.
-        LocalSocket c = clientSocket;
-        if (c != null) {
-            try {
-                c.shutdownInput();
-            } catch (IOException ignored) {
-            }
-            try {
-                c.shutdownOutput();
-            } catch (IOException ignored) {
-            }
-            closeQuietly(c);
+        Link l = link;
+        if (l instanceof AdbLink) {
+            ((AdbLink) l).close();
         }
     }
 
@@ -302,34 +496,208 @@ public class RelayActivity extends Activity {
     }
 
     private void serve(LocalSocket s) {
-        clientSocket = s;
+        AdbLink l;
         try {
-            client = s.getOutputStream();
-            updateConnection();
-            if (pendingUrl != null) {
-                sendOpen();
-            }
-            BufferedReader in = new BufferedReader(
-                    new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-            String line;
-            while ((line = in.readLine()) != null) {
-                onMessage(line);
-            }
+            l = new AdbLink(s);
+        } catch (IOException e) {
+            closeQuietly(s);
+            return;
+        }
+        link = l;
+        onLinkUp();
+        try {
+            pumpLines(s.getInputStream(), new LineSink() {
+                @Override
+                public void onLine(String line) {
+                    onMessage(line);
+                }
+            });
         } catch (IOException e) {
             Log.w(TAG, "client dropped", e);
         } finally {
-            client = null;
-            clientSocket = null;
-            closeQuietly(s);
-            if (!closing) {
-                if (pendingUrl != null) {
-                    show(State.DROPPED, null);
-                } else {
-                    updateConnection();
-                }
-            }
+            l.close();
+            linkLost(l);
         }
     }
+
+    // ------------------------------------------------------------------ USB accessory link
+
+    /**
+     * The connection over a USB accessory. It is deliberately NOT tied to one screen: the accessory
+     * file can be opened by only one reader at a time, and a read blocked in the kernel can't be
+     * interrupted, so closing it when a screen goes away would leave it busy until the cable is
+     * unplugged. Instead one UsbLink and its reader thread live for as long as the accessory stays
+     * attached; whichever screen is current is its "owner" and receives the messages. While no screen
+     * owns it, it still answers pings, so the computer can see this app is alive.
+     */
+    private static final class UsbLink implements Link, LineSink {
+        private final ParcelFileDescriptor pfd;
+        private final FileInputStream in;
+        private final FileOutputStream out;
+        private final String description;
+        volatile RelayActivity owner;
+        volatile boolean dead;
+
+        UsbLink(ParcelFileDescriptor pfd, String description) {
+            this.pfd = pfd;
+            this.in = new FileInputStream(pfd.getFileDescriptor());
+            this.out = new FileOutputStream(pfd.getFileDescriptor());
+            this.description = description == null ? "" : description;
+        }
+
+        void start() {
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        pumpLines(in, UsbLink.this);
+                    } catch (IOException e) {
+                        Log.i(TAG, "usb link ended: " + e.getMessage());
+                    } finally {
+                        dead = true;
+                        try {
+                            pfd.close();
+                        } catch (IOException ignored) {
+                        }
+                        if (sUsb == UsbLink.this) {
+                            sUsb = null;
+                        }
+                        RelayActivity o = owner;
+                        if (o != null) {
+                            o.linkLost(UsbLink.this);
+                        }
+                    }
+                }
+            }, "oauthrelay-usb");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        @Override
+        public void onLine(String line) {
+            if (line.contains("\"ping\"")) {
+                try {
+                    if ("ping".equals(new JSONObject(line).optString("type"))) {
+                        send("{\"type\":\"pong\"}");
+                        return;
+                    }
+                } catch (JSONException ignored) {
+                }
+            }
+            RelayActivity o = owner;
+            if (o != null) {
+                o.onMessage(line);
+            }
+        }
+
+        @Override
+        public synchronized boolean send(String json) {
+            if (dead) {
+                return false;
+            }
+            byte[] data = (json + "\n").getBytes(StandardCharsets.UTF_8);
+            // A bulk transfer whose length is an exact multiple of the packet size (64, 512 or 1024)
+            // ends without a short packet, and the other side's read doesn't complete. One more newline
+            // (a blank line, which the reader skips) avoids that.
+            if (data.length % 64 == 0) {
+                byte[] padded = new byte[data.length + 1];
+                System.arraycopy(data, 0, padded, 0, data.length);
+                padded[data.length] = '\n';
+                data = padded;
+            }
+            try {
+                out.write(data);
+                return true;
+            } catch (IOException e) {
+                Log.w(TAG, "usb send failed", e);
+                return false;
+            }
+        }
+
+        @Override
+        public String describe(Context c) {
+            return description.isEmpty()
+                    ? c.getString(R.string.computer_connected_usb)
+                    : c.getString(R.string.computer_connected_usb_named, description);
+        }
+
+        @Override
+        public String transport() {
+            return "usb";
+        }
+    }
+
+    /** Takes over the live USB link, or opens the accessory if one is attached and permitted. */
+    private void adoptUsb(UsbAccessory attached) {
+        UsbLink u = sUsb;
+        if (u != null && !u.dead) {
+            u.owner = this;
+            link = u;
+            onLinkUp();
+            return;
+        }
+        UsbManager usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+        if (usb == null) {
+            return;
+        }
+        UsbAccessory acc = attached;
+        if (acc == null) {
+            UsbAccessory[] list = usb.getAccessoryList();
+            if (list != null && list.length > 0) {
+                acc = list[0];
+            }
+        }
+        if (acc == null) {
+            return;
+        }
+        if (!usb.hasPermission(acc)) {
+            requestUsbPermission(usb, acc);
+            return;
+        }
+        ParcelFileDescriptor pfd;
+        try {
+            pfd = usb.openAccessory(acc);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "openAccessory failed", e);
+            pfd = null;
+        }
+        if (pfd == null) {
+            show(State.IDLE, getString(R.string.usb_open_failed));
+            return;
+        }
+        UsbLink opened = new UsbLink(pfd, acc.getDescription());
+        sUsb = opened;
+        opened.owner = this;
+        opened.start();
+        link = opened;
+        onLinkUp();
+    }
+
+    private void requestUsbPermission(UsbManager usb, UsbAccessory acc) {
+        if (permissionReceiver == null) {
+            permissionReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        adoptUsb((UsbAccessory) intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY));
+                    }
+                }
+            };
+            IntentFilter f = new IntentFilter(ACTION_USB_PERMISSION);
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(permissionReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(permissionReceiver, f);
+            }
+        }
+        // The system fills in the result, so the PendingIntent must be mutable; on newer targets that
+        // is only allowed for an explicit intent, hence setPackage.
+        Intent intent = new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName());
+        int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
+        usb.requestPermission(acc, PendingIntent.getBroadcast(this, 0, intent, flags));
+    }
+
+    // ------------------------------------------------------------------ messages
 
     private void onMessage(String line) {
         try {
@@ -345,9 +713,74 @@ public class RelayActivity extends Activity {
                         finish();
                     }
                 });
+            } else if ("callback".equals(type)) {
+                deliverCallback(m.optString("url"));
+            } else if ("ping".equals(type)) {
+                send("{\"type\":\"pong\"}");
             }
         } catch (JSONException e) {
             Log.w(TAG, "bad message", e);
+        }
+    }
+
+    /**
+     * The computer returns the address the browser ended up on. Hand it to the app that asked, but
+     * only if it really is the return address of the page we're waiting on, with the same state, so
+     * nothing else that can reach this connection can feed an app a login result.
+     */
+    private void deliverCallback(final String url) {
+        String page = pendingUrl;
+        if (page == null || url.isEmpty()) {
+            send(errorJson("No sign-in is waiting for a result."));
+            return;
+        }
+        int verdict = new Redirect.Request(page).accepts(url);
+        if (verdict == Redirect.STATE_MISMATCH) {
+            send(errorJson("That result is from a different sign-in."));
+            return;
+        }
+        if (verdict != Redirect.OK) {
+            send(errorJson("That isn't this sign-in's return address."));
+            return;
+        }
+        final String caller = callerPackage();
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (caller != null) {
+                        i.setPackage(caller);
+                    }
+                    startActivity(i);
+                } catch (ActivityNotFoundException e) {
+                    Log.w(TAG, "no activity for the callback", e);
+                    send(errorJson("The app didn't accept the result."));
+                    return;
+                } catch (SecurityException e) {
+                    Log.w(TAG, "callback refused", e);
+                    send(errorJson("The app didn't accept the result."));
+                    return;
+                }
+                pendingUrl = null;
+                send("{\"type\":\"delivered\"}");
+                // Let the app's own screen take the result before this one closes.
+                main.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        finish();
+                    }
+                }, FINISH_DELAY_MS);
+            }
+        });
+    }
+
+    private static String errorJson(String text) {
+        try {
+            return new JSONObject().put("type", "error").put("text", text).toString();
+        } catch (JSONException e) {
+            return "{\"type\":\"error\"}";
         }
     }
 
@@ -368,21 +801,6 @@ public class RelayActivity extends Activity {
             }
         } catch (JSONException e) {
             Log.w(TAG, "encode failed", e);
-        }
-    }
-
-    private synchronized boolean send(String json) {
-        OutputStream out = client;
-        if (out == null) {
-            return false;
-        }
-        try {
-            out.write((json + "\n").getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            return true;
-        } catch (IOException e) {
-            Log.w(TAG, "send failed", e);
-            return false;
         }
     }
 

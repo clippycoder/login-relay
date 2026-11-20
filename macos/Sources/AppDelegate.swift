@@ -142,15 +142,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .needsApp:
                 if engine.bundledAPK != nil { menu.addItem(item("Install Login Relay on Phone", #selector(installOnPhone))) }
             case .ready:
-                menu.addItem(item("Open Login Relay on Phone", #selector(openOnPhone)))
-                if engine.phoneAppIsOutdated, let have = engine.phoneVersion, let new = engine.bundledPhoneVersion {
-                    menu.addItem(item("Update Login Relay on Phone (\(have) → \(new))", #selector(installOnPhone)))
+                if engine.transport == .adb {
+                    menu.addItem(item("Open Login Relay on Phone", #selector(openOnPhone)))
+                    if engine.phoneAppIsOutdated, let have = engine.phoneVersion, let new = engine.bundledPhoneVersion {
+                        menu.addItem(item("Update Login Relay on Phone (\(have) → \(new))", #selector(installOnPhone)))
+                    }
                 }
             case .working(let flow):
                 menu.addItem(item("Cancel \(flow.request.verb)", #selector(cancelFlow)))
-            case .noPhone, .unauthorized:
+            case .noPhone, .unauthorized, .connecting:
                 menu.addItem(item("Check Again", #selector(checkAgain)))
             }
+        }
+
+        let usbPhones = engine.transport == .usb ? engine.usbCandidates : []
+        if usbPhones.count > 1 {
+            let sub = NSMenu()
+            for p in usbPhones {
+                let it = NSMenuItem(title: p.name.isEmpty ? p.id : p.name, action: #selector(selectUsbPhone(_:)), keyEquivalent: "")
+                it.target = self
+                it.representedObject = p.id
+                it.state = ("usb:" + p.id) == engine.device?.serial ? .on : .off
+                sub.addItem(it)
+            }
+            let parent = NSMenuItem(title: "Phone", action: nil, keyEquivalent: "")
+            parent.submenu = sub
+            menu.addItem(parent)
         }
 
         let usable = engine.devices.filter { $0.isUsable }
@@ -168,6 +185,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(parent)
         }
         if menu.items.last?.isSeparatorItem == false { menu.addItem(.separator()) }
+
+        let connectMenu = NSMenu()
+        for (t, title) in [(Transport.adb, "adb (needs USB debugging)"), (Transport.usb, "USB accessory (no USB debugging) — beta")] {
+            let it = NSMenuItem(title: title, action: #selector(chooseTransport(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = t.rawValue
+            it.state = engine.transport == t ? .on : .off
+            connectMenu.addItem(it)
+        }
+        let connectParent = NSMenuItem(title: "Connect Over", action: nil, keyEquivalent: "")
+        connectParent.submenu = connectMenu
+        menu.addItem(connectParent)
 
         menu.addItem(item("Show Activity…", #selector(showWindow)))
         menu.addItem(.separator())
@@ -204,6 +233,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func cancelFlow() { engine.cancelActive("Cancelled on the computer.", notifyPhone: true) }
     @objc private func downloadPlatformTools() { confirmDownloadPlatformTools() }
     @objc private func pickAdb() { chooseAdb() }
+    @objc private func chooseTransport(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let t = Transport(rawValue: raw) { engine.setTransport(t) }
+    }
+    @objc private func selectUsbPhone(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { engine.selectUsb(id) }
+    }
     @objc private func selectPhone(_ sender: NSMenuItem) {
         if let serial = sender.representedObject as? String { engine.selectDevice(serial) }
     }

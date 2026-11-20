@@ -6,11 +6,11 @@ import UserNotifications
 final class Flow {
     let request: RelayRequest
     let device: Device
-    let link: PhoneLink
+    let link: PhoneConnection
     var claim: SchemeClaim?
     var timeout: Timer?
 
-    init(request: RelayRequest, device: Device, link: PhoneLink) {
+    init(request: RelayRequest, device: Device, link: PhoneConnection) {
         self.request = request
         self.device = device
         self.link = link
@@ -22,6 +22,8 @@ enum Phase {
     case noPhone
     case unauthorized(Device)
     case needsApp(Device)
+    /// USB mode: a phone is plugged in but Login Relay on it isn't answering yet. The text says what we're waiting for.
+    case connecting(Device, String)
     case ready(Device)
     case working(Flow)
 }
@@ -43,11 +45,19 @@ final class RelayEngine {
     private(set) var active: Flow?
     private(set) var busy: String?
     private(set) var logLines: [(date: Date, text: String)] = []
+    private(set) var usbCandidates: [UsbDevice] = []
+    private(set) var usbDetail = ""
+    private(set) var usbAlive = false
+    private var awaitingDelivery: Flow?
+    private var deliveryTimer: Timer?
+
+    var transport: Transport { Prefs.transport }
 
     var onChange: (() -> Void)?
     var verbose = false
 
     var phase: Phase {
+        if transport == .usb { return usbPhase }
         if adb == nil { return .noAdb }
         guard let device else {
             if let blocked = devices.first(where: { !$0.isUsable }) { return .unauthorized(blocked) }
@@ -56,6 +66,13 @@ final class RelayEngine {
         if phoneVersion == nil { return .needsApp(device) }
         if let active { return .working(active) }
         return .ready(device)
+    }
+
+    private var usbPhase: Phase {
+        guard let device else { return .noPhone }
+        if let active { return .working(active) }
+        if usbAlive { return .ready(device) }
+        return .connecting(device, usbDetail)
     }
 
     /// The version of the phone app bundled with this Mac app, if any.
@@ -73,7 +90,7 @@ final class RelayEngine {
     private var watchdog: Timer?
     private var forceCheck = false
     private let wake = DispatchSemaphore(value: 0)
-    private var currentLink: PhoneLink?
+    private var currentLink: PhoneConnection?
     private var thread: Thread?
     private let stateLock = NSLock()
 
@@ -96,7 +113,10 @@ final class RelayEngine {
         generation += 1
         let gen = generation
         tick()
-        let t = Thread { [weak self] in self?.loop(gen: gen) }
+        let usb = Prefs.transport == .usb
+        let t = Thread { [weak self] in
+            if usb { self?.usbLoop(gen: gen) } else { self?.loop(gen: gen) }
+        }
         t.name = "relay-loop"
         t.start()
         thread = t
@@ -270,22 +290,27 @@ final class RelayEngine {
         if device == nil || version == nil, active != nil { cancelActive("Phone not available", notifyPhone: false) }
     }
 
-    private func linkOpened(_ link: PhoneLink) {
+    private func linkOpened(_ link: PhoneConnection) {
         currentLink = link
         linked = true
-        log("Linked to Login Relay on the phone.")
+        log(link is UsbPhoneLink ? "USB connection open." : "Linked to Login Relay on the phone.")
         onChange?()
     }
 
-    private func linkClosed(_ link: PhoneLink) {
-        if currentLink === link { currentLink = nil; linked = false; log("Link to the phone closed.") }
+    private func linkClosed(_ link: PhoneConnection) {
+        if currentLink === link {
+            currentLink = nil
+            linked = false
+            if link is UsbPhoneLink { usbAlive = false; phoneVersion = nil }
+            log("Link to the phone closed.")
+        }
         if active?.link === link { cancelActive("The phone closed Login Relay.", notifyPhone: false) }
         onChange?()
     }
 
     // MARK: messages from the phone
 
-    private func handle(_ msg: [String: Any], link: PhoneLink, device: Device) {
+    private func handle(_ msg: [String: Any], link: PhoneConnection, device: Device) {
         switch msg["type"] as? String {
         case "open":
             guard let url = msg["url"] as? String else { return }
@@ -295,6 +320,16 @@ final class RelayEngine {
             DispatchQueue.main.async {
                 if self.active?.link === link { self.cancelActive("Cancelled on the phone.", notifyPhone: false) }
             }
+        case "hello":
+            DispatchQueue.main.async {
+                let version = msg["version"] as? String
+                if device.isUSB { self.phoneVersion = version }
+                self.log("Login Relay \(version ?? "?") on the phone says hello (\(msg["transport"] as? String ?? "?")).")
+            }
+        case "delivered":
+            DispatchQueue.main.async { self.deliveryConfirmed() }
+        case "error":
+            DispatchQueue.main.async { self.phoneReportedError(msg["text"] as? String ?? "unknown error") }
         default:
             break
         }
@@ -302,7 +337,7 @@ final class RelayEngine {
 
     // MARK: one login
 
-    private func begin(_ request: RelayRequest, link: PhoneLink, device: Device) {
+    private func begin(_ request: RelayRequest, link: PhoneConnection, device: Device) {
         if active != nil { cancelActive("Replaced by a newer request.", notifyPhone: false) }
         log("\(request.appName) wants to open a \(request.verb) page\(request.host.map { " at \($0)" } ?? "").")
 
@@ -373,6 +408,18 @@ final class RelayEngine {
         }
         log("Returning to \(flow.request.appName) on the phone…")
         onChange?()
+        if flow.device.isUSB {
+            // No adb here: the phone checks the result itself and hands it to the app.
+            awaitingDelivery = flow
+            deliveryTimer?.invalidate()
+            deliveryTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+                guard let self, self.awaitingDelivery != nil else { return }
+                self.awaitingDelivery = nil
+                self.log("The phone didn't confirm it handed the result to the app.")
+            }
+            flow.link.send(["type": "callback", "url": callback])
+            return
+        }
         guard let adb else { return }
         DispatchQueue.global().async {
             let r = adb.deliver(flow.device.serial, url: callback, package: flow.request.caller)
@@ -386,6 +433,21 @@ final class RelayEngine {
                 // Let the app's own screen take the result before Login Relay closes.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { flow.link.send(["type": "done"]) }
             }
+        }
+    }
+
+    private func deliveryConfirmed() {
+        guard let flow = awaitingDelivery else { return }
+        awaitingDelivery = nil
+        deliveryTimer?.invalidate()
+        log("Done: \(flow.request.appName) is finishing the \(flow.request.verb).")
+    }
+
+    private func phoneReportedError(_ text: String) {
+        log("The phone says: \(text)")
+        if awaitingDelivery != nil {
+            awaitingDelivery = nil
+            deliveryTimer?.invalidate()
         }
     }
 
@@ -484,6 +546,152 @@ final class RelayEngine {
                 }
                 self.onChange?()
                 self.refreshNow()
+            }
+        }
+    }
+
+    // MARK: USB accessory mode
+
+    /// Switches between adb and USB accessory mode.
+    func setTransport(_ t: Transport) {
+        guard t != Prefs.transport else { return }
+        cancelActive("Switching connection type.", notifyPhone: true)
+        currentLink?.close()
+        Prefs.transport = t
+        adb = nil; devices = []; device = nil; phoneVersion = nil; linked = false
+        usbCandidates = []; usbAlive = false; usbDetail = ""
+        log(t == .usb ? "Connecting over USB accessory mode (no USB debugging needed)." : "Connecting over adb.")
+        startLoop()
+        onChange?()
+    }
+
+    func selectUsb(_ id: String) {
+        Prefs.usbSelected = id
+        refreshNow()
+    }
+
+    private func applyUSB(device: Device?, candidates: [UsbDevice], detail: String) {
+        let changed = self.device != device || usbCandidates != candidates || usbDetail != detail
+        if self.device != device { log(device.map { "USB phone: \($0.title)" } ?? "No USB phone.") }
+        self.device = device
+        usbCandidates = candidates
+        usbDetail = detail
+        if changed { onChange?() }
+        if device == nil, active != nil { cancelActive("Phone not available", notifyPhone: false) }
+    }
+
+    private func usbAliveChanged(_ alive: Bool, link: PhoneConnection) {
+        guard currentLink === link, usbAlive != alive else { return }
+        usbAlive = alive
+        log(alive ? "Login Relay on the phone is answering." : "Login Relay on the phone stopped answering.")
+        if !alive {
+            phoneVersion = nil
+            if active != nil { cancelActive("Login Relay on the phone stopped answering.", notifyPhone: false) }
+        }
+        onChange?()
+    }
+
+    /// An adb server holds a phone exclusively, which blocks the accessory switch. Stopping it is harmless:
+    /// it restarts the next time something needs it.
+    private func stopAdbServer() -> Bool {
+        guard let path = Adb.locate(userChoice: Prefs.adbPath) else { return false }
+        logAsync("Another program has the phone open, probably the adb server. Stopping it (it restarts when needed).")
+        _ = Adb.exec(path, ["kill-server"], timeout: 10)
+        return true
+    }
+
+    /// Background loop for USB accessory mode: find a phone, switch it to accessory mode, open the pipe,
+    /// and keep it open until the cable comes out.
+    private func usbLoop(gen: Int) {
+        let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        var lastSwitch: [UInt32: Date] = [:]
+        func current() -> Bool { !stopping && gen == generation }
+        func pause(_ seconds: TimeInterval) { _ = wake.wait(timeout: .now() + seconds) }
+        func publish(_ d: Device?, _ c: [UsbDevice], _ detail: String) {
+            DispatchQueue.main.async { if gen == self.generation { self.applyUSB(device: d, candidates: c, detail: detail) } }
+        }
+
+        while current() {
+            tick()
+            let all = Usb.list()
+            // A phone that was unplugged gets a fresh try when it comes back.
+            for location in Array(lastSwitch.keys) where !all.contains(where: { $0.location == location }) {
+                lastSwitch[location] = nil
+            }
+            let candidates = all.filter { $0.looksAndroid && !$0.isAccessory }
+            var target = all.first(where: { $0.isAccessory })
+            if target == nil {
+                if let selected = Prefs.usbSelected, let c = candidates.first(where: { $0.id == selected }) {
+                    target = c
+                } else if candidates.count == 1 {
+                    target = candidates[0]
+                }
+            }
+            guard let t = target else {
+                publish(nil, candidates, candidates.count > 1 ? "Choose which phone to use from the menu." : "")
+                pause(1)
+                continue
+            }
+            let device = Device(serial: "usb:" + t.id, state: "device", model: t.name.replacingOccurrences(of: " ", with: "_"))
+
+            if !t.isAccessory {
+                if let last = lastSwitch[t.location], Date().timeIntervalSince(last) < 20 { pause(1); continue }
+                lastSwitch[t.location] = Date()
+                publish(device, candidates, "Asking \(t.name) to switch to USB accessory mode…")
+                var r = Usb.switchToAccessory(location: t.location, hostName: hostName)
+                if r.code == Int32(AOA_ERR_OPEN), r.iokit == Usb.exclusiveAccess, stopAdbServer() {
+                    pause(1)
+                    r = Usb.switchToAccessory(location: t.location, hostName: hostName)
+                }
+                if r.code != 0 {
+                    publish(device, candidates, Usb.errorText(r, name: t.name))
+                    pause(3)
+                    continue
+                }
+                // Android gives up if the host hasn't reconnected within 10 s.
+                var appeared = false
+                for _ in 0..<60 {
+                    guard current() else { return }
+                    usleep(200_000)
+                    tick()
+                    if Usb.list().contains(where: { $0.location == t.location && $0.isAccessory }) { appeared = true; break }
+                }
+                if !appeared {
+                    publish(device, candidates, "The phone didn't switch to accessory mode.")
+                    continue
+                }
+            }
+
+            var opened: OpaquePointer?
+            for attempt in 0..<6 {
+                guard current() else { return }
+                let o = Usb.open(location: t.location)
+                if let c = o.conn { opened = c; break }
+                if attempt == 5 { publish(device, candidates, "Couldn't open the accessory connection (error \(o.code)).") }
+                usleep(500_000)
+            }
+            guard let conn = opened else { pause(3); continue }
+
+            let link = UsbPhoneLink(conn: conn)
+            let closed = DispatchSemaphore(value: 0)
+            link.onMessage = { [weak self, weak link] msg in
+                guard let self, let link else { return }
+                self.handle(msg, link: link, device: device)
+            }
+            link.onAlive = { [weak self, weak link] alive in
+                DispatchQueue.main.async { if let link { self?.usbAliveChanged(alive, link: link) } }
+            }
+            link.onClose = { [weak self, weak link] in
+                DispatchQueue.main.async { if let link { self?.linkClosed(link) } }
+                closed.signal()
+            }
+            publish(device, candidates, "Waiting for Login Relay on the phone. If it asks to allow USB access, tap OK.")
+            DispatchQueue.main.async { self.linkOpened(link) }
+            link.start()
+            while closed.wait(timeout: .now() + 1) == .timedOut {
+                tick()
+                if !current() { link.close(); break }
+                if !Usb.list().contains(where: { $0.location == t.location && $0.isAccessory }) { link.close(); break }
             }
         }
     }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Matches the strings a Login Relay desktop app sends when it switches the phone into USB accessory
+     mode (AOA). Filter on manufacturer and model only: a version-only filter crashes Android 10 and
+     below. -->
+<resources>
+    <usb-accessory
+        manufacturer="Login Relay"
+        model="Desktop" />
+</resources>
