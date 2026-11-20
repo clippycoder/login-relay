@@ -569,7 +569,9 @@ namespace LoginRelay.Core.Tests
             {
                 rig.Backend.Add(new UsbDevice(0x04E8, 0x6860, "1-1", false, true, "Android phone (04e8:6860)", "", false));
                 rig.Diagnostics.Set(Pnp("SAMSUNG Android", @"USB\VID_04E8&PID_6860\RF8M123", new[] { @"USB\Class_06&SubClass_01&Prot_01", @"USB\Class_06&SubClass_01" }, "WUDFWpdMtp"));
-                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.UsbSetup?.State == UsbSetupState.NeedsPhoneDriver)));
+                // The engine may first report the generic libusb name, then the Windows one once the diagnosis lands.
+                Assert.True(TestUtil.WaitFor(() => rig.Ui.Invoke(() => rig.Engine.Describe()).Status == "SAMSUNG Android needs a USB driver"));
+                Assert.Equal(UsbSetupState.NeedsPhoneDriver, rig.Ui.Invoke(() => rig.Engine.UsbSetup?.State));
                 Assert.Empty(rig.Backend.Switches);
                 (string status, string detail) = rig.Ui.Invoke(() => rig.Engine.Describe());
                 Assert.Equal("SAMSUNG Android needs a USB driver", status);
