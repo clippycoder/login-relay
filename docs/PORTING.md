@@ -154,9 +154,12 @@ app's own data folder.
 adb needs Developer options and USB debugging, which filtered or managed phones often can't or shouldn't
 have. USB accessory mode (Android Open Accessory, "AOA", the protocol Android Auto uses) needs neither.
 The macOS app has it (`Usb.swift`, `UsbFraming.swift`, `aoa_mac.c`, and `usbLoop` in `RelayEngine.swift`),
-and so does the Linux app (`usbaoa.py`, `usblink.py`, `usbframing.py`, over pyusb). **Windows** needs a
-driver (WinUSB, installed once with Zadig) bound to the phone and to the accessory interface: libusb can only
-open devices bound to WinUSB, and the stock Windows drivers for a phone expose no way to send the switch.
+and so does the Linux app (`usbaoa.py`, `usblink.py`, `usbframing.py`, over pyusb). The Windows app has it
+too (`LibUsb.cs`, `Usb.cs`, `UsbLink.cs`, `UsbDiagnosis.cs`, `RelayEngine.Usb.cs`, over a bundled libusb 1.0.30;
+`windows/tools/LoginRelay.UsbProbe` is a console tool for trying it on a real PC) but needs a driver: WinUSB,
+installed once with Zadig, bound to the phone and then to the accessory interface. libusb can only open
+devices bound to WinUSB, and the stock Windows drivers for a phone expose no way to send the switch. The app
+diagnoses which step is missing through WMI (`Win32_PnPEntity`) and guides the user through it.
 
 The phone app (0.4.0+) registers for `USB_ACCESSORY_ATTACHED` with a filter for manufacturer
 "Login Relay" and model "Desktop", needs no permission, and Android asks the user once.

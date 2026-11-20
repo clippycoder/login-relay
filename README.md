@@ -81,8 +81,11 @@ on**. **Not yet tested with USB debugging off**, where the phone may not appear 
 "File transfer". An adb server holds a phone exclusively and blocks the switch, so the Mac app stops the adb
 server when it hits that (it restarts when needed). macOS has it first; Linux has it too but has only been
 tested against a simulated phone (pick **Connect over → USB accessory**; the .deb installs a udev rule that
-gives you access to the phone). Windows needs a driver installed for the phone and for the accessory device
-(see below), so it is still being built.
+gives you access to the phone). Windows has it too, **never yet run with a real phone**, and needs a one-time
+driver install: Windows' stock phone drivers can't be used for this, so the app walks you through installing
+WinUSB with [Zadig](https://zadig.akeo.ie/) twice (for the phone, then for the "Android Accessory Interface"
+that appears after the switch). A **Connect Over** menu entry in the tray app turns it on; adb mode needs no
+driver.
 
 ### Windows
 
